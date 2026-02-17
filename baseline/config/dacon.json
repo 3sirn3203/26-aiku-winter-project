@@ -1,0 +1,26 @@
+{
+  "data": {
+    "train_path": "data/dacon/train.csv",
+    "test_path": "data/dacon/test.csv",
+    "sample_submission_path": "data/dacon/sample_submission.csv",
+    "output_path": "baseline/generated/submission_dacon.csv",
+    "id_col": "ID",
+    "label_col": "completed"
+  },
+  "model": {
+    "eval_metric": "f1",
+    "problem_type": "binary",
+    "presets": "best_quality",
+    "time_limit": 1800
+  },
+  "validation": {
+    "method": "holdout",
+    "holdout_frac": 0.2,
+    "num_bag_folds": 5,
+    "num_bag_sets": 1,
+    "num_stack_levels": 0
+  },
+  "fit": {
+    "hyperparameters": "default"
+  }
+}
