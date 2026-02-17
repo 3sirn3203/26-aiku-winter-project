@@ -1,0 +1,46 @@
+{
+    "data": {
+        "train_path": "data/dacon/train.csv",
+        "test_path": "data/dacon/test.csv",
+        "submission_path": "data/dacon/sample_submission.csv"
+    },
+    "feature_engineering": {
+        "budget": {
+            "iterations": 1,
+            "time_limit_per_iteration": 1800
+        },
+        "profile": {
+            "model": "gemini-2.5-flash",
+            "temperature": 0.2,
+            "max_tokens": 8192,
+            "top_p": 0.9,
+            "max_codegen_attempts": 2,
+            "execution_timeout_sec": 120
+        },
+        "hypothesis": {
+            "model": "gemini-2.5-flash",
+            "temperature": 0.2,
+            "max_tokens": 8192,
+            "top_p": 0.9,
+            "max_attempts": 2
+        },
+        "design": {
+
+        },
+        "implement": {
+
+        },
+        "execute": {
+
+        },
+        "diagnose": {
+
+        },
+        "report": {
+            
+        }
+    },
+    "modeling": {
+
+    }
+}
