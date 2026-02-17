@@ -19,3 +19,6 @@ ENV/
 
 
 model/
+generated/
+submission/
+runs/
