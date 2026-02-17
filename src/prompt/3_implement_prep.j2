@@ -12,10 +12,18 @@ Strict validator contract:
 Rules:
 - `fit_preprocessor` must use only `train_df` to compute preprocessing state.
 - `transform_preprocessor` must apply only the learned state.
+- Always use function argument `label_col` (not `config["label_col"]`) for label handling.
 - If `label_col` exists in input `df`, keep it unchanged in output.
+- If `label_col` does not exist in input `df`, do not create it.
 - Do not require files outside this module.
 - Allowed libraries: pandas, numpy, sklearn (if needed).
 - Handle missing values and categorical values robustly.
+- Output must preserve row count exactly.
+- Output column schema must be stable across train/valid/test.
+- If using `ColumnTransformer`, create final columns via `preprocessor.get_feature_names_out()`.
+- Ensure transformed matrix and column names always match in length.
+- Store learned output column schema in `prep_state` and enforce it at transform time.
+- Fill missing transformed columns with 0 and drop unexpected extra columns.
 
 Output:
 - Return only executable Python code.
@@ -27,6 +35,12 @@ profile_result:
 
 preprocessing_hypotheses:
 {{ preprocessing_hypotheses_json }}
+
+External execution feedback from previous failed execute (nullable):
+{{ external_feedback_json }}
+
+Contract check feedback from previous implement attempt (nullable):
+{{ contract_feedback_json }}
 
 Previous generation feedback (nullable):
 {{ generation_feedback_json }}

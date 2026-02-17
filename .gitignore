@@ -20,5 +20,5 @@ ENV/
 
 model/
 generated/
-submission/
+submissions/
 runs/

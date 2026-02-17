@@ -91,6 +91,7 @@ def run_cross_validation(
     enabled_blocks: Optional[Iterable[str]] = None,
 ) -> Dict[str, Any]:
     label_col = _resolve_label_col(config=config, train_df=train_df)
+    runtime_config = _build_module_runtime_config(config=config, label_col=label_col, enabled_blocks=enabled_blocks)
     modeling_cfg = _resolve_modeling_cfg(config)
     task_type = modeling_cfg["task_type"]
     metric = modeling_cfg["metric"]
@@ -128,21 +129,21 @@ def run_cross_validation(
         train_fold = train_df.iloc[train_idx].reset_index(drop=True)
         valid_fold = train_df.iloc[valid_idx].reset_index(drop=True)
 
-        prep_state = preprocessor_module.fit_preprocessor(train_fold.copy(), label_col, config)
-        train_pre = preprocessor_module.transform_preprocessor(train_fold.copy(), prep_state, config)
-        valid_pre = preprocessor_module.transform_preprocessor(valid_fold.copy(), prep_state, config)
+        prep_state = preprocessor_module.fit_preprocessor(train_fold.copy(), label_col, runtime_config)
+        train_pre = preprocessor_module.transform_preprocessor(train_fold.copy(), prep_state, runtime_config)
+        valid_pre = preprocessor_module.transform_preprocessor(valid_fold.copy(), prep_state, runtime_config)
         _assert_label_exists(train_pre, label_col, "train_preprocessed")
         _assert_label_exists(valid_pre, label_col, "valid_preprocessed")
 
         fe_state = feature_module.fit_feature_engineering(
             train_df=train_pre.copy(),
             label_col=label_col,
-            config=config,
+            config=runtime_config,
             enabled_blocks=enabled_blocks,
         )
         last_fe_state = fe_state
-        x_train_raw = feature_module.transform_feature_engineering(train_pre.copy(), fe_state, config)
-        x_valid_raw = feature_module.transform_feature_engineering(valid_pre.copy(), fe_state, config)
+        x_train_raw = feature_module.transform_feature_engineering(train_pre.copy(), fe_state, runtime_config)
+        x_valid_raw = feature_module.transform_feature_engineering(valid_pre.copy(), fe_state, runtime_config)
 
         x_train, x_valid = _align_and_encode_pair(x_train_raw, x_valid_raw)
 
@@ -234,6 +235,7 @@ def fit_full_and_predict(
     enabled_blocks: Optional[Iterable[str]] = None,
 ) -> Dict[str, Any]:
     label_col = _resolve_label_col(config=config, train_df=train_df, test_df=test_df, sample_submission_df=sample_submission_df)
+    runtime_config = _build_module_runtime_config(config=config, label_col=label_col, enabled_blocks=enabled_blocks)
     id_col = _resolve_id_col(config=config, train_df=train_df, test_df=test_df, sample_submission_df=sample_submission_df)
     modeling_cfg = _resolve_modeling_cfg(config)
     task_type = modeling_cfg["task_type"]
@@ -241,19 +243,19 @@ def fit_full_and_predict(
     model_params = modeling_cfg["model_params"]
     random_state = modeling_cfg["random_state"]
 
-    prep_state = preprocessor_module.fit_preprocessor(train_df.copy(), label_col, config)
-    train_pre = preprocessor_module.transform_preprocessor(train_df.copy(), prep_state, config)
-    test_pre = preprocessor_module.transform_preprocessor(test_df.copy(), prep_state, config)
+    prep_state = preprocessor_module.fit_preprocessor(train_df.copy(), label_col, runtime_config)
+    train_pre = preprocessor_module.transform_preprocessor(train_df.copy(), prep_state, runtime_config)
+    test_pre = preprocessor_module.transform_preprocessor(test_df.copy(), prep_state, runtime_config)
     _assert_label_exists(train_pre, label_col, "train_preprocessed")
 
     fe_state = feature_module.fit_feature_engineering(
         train_df=train_pre.copy(),
         label_col=label_col,
-        config=config,
+        config=runtime_config,
         enabled_blocks=enabled_blocks,
     )
-    x_train_raw = feature_module.transform_feature_engineering(train_pre.copy(), fe_state, config)
-    x_test_raw = feature_module.transform_feature_engineering(test_pre.copy(), fe_state, config)
+    x_train_raw = feature_module.transform_feature_engineering(train_pre.copy(), fe_state, runtime_config)
+    x_test_raw = feature_module.transform_feature_engineering(test_pre.copy(), fe_state, runtime_config)
     x_train, x_test = _align_and_encode_pair(x_train_raw, x_test_raw)
 
     if task_type == "classification":
@@ -310,6 +312,23 @@ def _resolve_modeling_cfg(config: Dict[str, Any]) -> Dict[str, Any]:
         "model_type": str(model.get("type", "random_forest")).lower(),
         "model_params": dict(model.get("params", {}) or {}),
     }
+
+
+def _build_module_runtime_config(
+    config: Dict[str, Any],
+    label_col: str,
+    enabled_blocks: Optional[Iterable[str]] = None,
+) -> Dict[str, Any]:
+    runtime = dict(config)
+    runtime["label_col"] = label_col
+
+    data_cfg = dict(runtime.get("data", {}) or {})
+    data_cfg["label_col"] = label_col
+    runtime["data"] = data_cfg
+
+    if enabled_blocks is not None:
+        runtime["enabled_blocks"] = [str(block) for block in enabled_blocks]
+    return runtime
 
 
 def _resolve_label_col(

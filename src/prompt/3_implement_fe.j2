@@ -17,8 +17,12 @@ Rules:
 - Return features only from `transform_feature_engineering`.
 - Exclude `label_col` from transformed feature output.
 - Ensure stable output schema between train/valid/test.
-- If `enabled_blocks` is provided, only those blocks must be active.
+- If `enabled_blocks` is provided, only those blocks must be active. Use function argument `enabled_blocks`, not config key.
 - Allowed libraries: pandas, numpy, sklearn (if needed).
+- Never reference files outside this module.
+- Output must preserve row count exactly.
+- Store feature schema in `fe_state` and enforce exact column order at transform time.
+- Fill missing feature columns with 0 and drop unexpected extra feature columns.
 
 Output:
 - Return only executable Python code.
@@ -30,6 +34,12 @@ profile_result:
 
 feature_engineering_hypotheses:
 {{ feature_hypotheses_json }}
+
+External execution feedback from previous failed execute (nullable):
+{{ external_feedback_json }}
+
+Contract check feedback from previous implement attempt (nullable):
+{{ contract_feedback_json }}
 
 Previous generation feedback (nullable):
 {{ generation_feedback_json }}

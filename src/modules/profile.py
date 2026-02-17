@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import subprocess
@@ -52,11 +53,15 @@ def profiling(
     final_eda_code = ""
     final_profile_json: Optional[Dict[str, Any]] = None
     last_llm_raw_text = ""
+    diagnose_prompt_context = _build_diagnose_prompt_context(
+        prev_diagnose_result=prev_diagnose_result,
+        profile_cfg=profile_cfg,
+    )
 
     for attempt in range(1, max_codegen_attempts + 1):
         prompt = prompt_template.render(
             dataset_context=json.dumps(dataset_context, ensure_ascii=False),
-            previous_diagnose_json=json.dumps(prev_diagnose_result, ensure_ascii=False) if prev_diagnose_result is not None else "null",
+            previous_diagnose_json=json.dumps(diagnose_prompt_context, ensure_ascii=False) if diagnose_prompt_context is not None else "null",
             execution_feedback_json=json.dumps(execution_feedback, ensure_ascii=False) if execution_feedback is not None else "null",
         )
 
@@ -127,6 +132,7 @@ def profiling(
                 "system_instruction": system_instruction,
                 "max_codegen_attempts": max_codegen_attempts,
                 "execution_timeout_sec": execution_timeout_sec,
+                "diagnose_prompt_context": diagnose_prompt_context,
                 "raw_text": last_llm_raw_text,
             },
             file,
@@ -154,6 +160,77 @@ def _build_dataset_context(train_df: pd.DataFrame) -> Dict[str, Any]:
         "cardinality_top": cardinality_top,
         "sample_rows": sample_rows,
     }
+
+
+def _build_diagnose_prompt_context(
+    prev_diagnose_result: Optional[Dict[str, Any]],
+    profile_cfg: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    if not isinstance(prev_diagnose_result, dict):
+        return None
+
+    max_items = int(profile_cfg.get("diagnose_focus_max_items", 3))
+    max_text_chars = int(profile_cfg.get("diagnose_text_max_chars", 220))
+
+    root_cause = prev_diagnose_result.get("root_cause", {}) or {}
+    score_summary = prev_diagnose_result.get("score_summary", {}) or {}
+    comparison = prev_diagnose_result.get("comparison_to_best_before_iteration", {}) or {}
+    feedback = prev_diagnose_result.get("feedback_for_next_iteration", {}) or {}
+
+    def _truncate_text(value: Any) -> str:
+        text = str(value or "").strip()
+        if len(text) > max_text_chars:
+            return text[: max_text_chars - 3] + "..."
+        return text
+
+    def _truncate_list(items: Any) -> List[str]:
+        if not isinstance(items, list):
+            return []
+        out: List[str] = []
+        for item in items[:max_items]:
+            text = _truncate_text(item)
+            if text:
+                out.append(text)
+        return out
+
+    def _safe_float(value: Any) -> Optional[float]:
+        try:
+            parsed = float(value)
+        except Exception:
+            return None
+        if math.isnan(parsed):
+            return None
+        return parsed
+
+    compact = {
+        "status": prev_diagnose_result.get("status"),
+        "hard_failure": bool(prev_diagnose_result.get("hard_failure", False)),
+        "root_cause": {
+            "category": root_cause.get("category"),
+            "message": _truncate_text(root_cause.get("message", "")),
+        },
+        "score_summary": {
+            "metric": score_summary.get("metric"),
+            "mean_cv": _safe_float(score_summary.get("mean_cv")),
+            "std_cv": _safe_float(score_summary.get("std_cv")),
+            "objective_mean": _safe_float(score_summary.get("objective_mean")),
+            "n_features": score_summary.get("n_features"),
+        },
+        "comparison_to_previous_best": {
+            "has_previous_best": comparison.get("has_previous_best"),
+            "trend": comparison.get("trend"),
+            "delta_objective_mean": _safe_float(comparison.get("delta_objective_mean")),
+        },
+        "next_iteration_hints": {
+            "profile_focus": _truncate_list(feedback.get("profile_focus")),
+            "priority_actions": _truncate_list(feedback.get("priority_actions")),
+            "implement_constraints": _truncate_list(feedback.get("implement_constraints")),
+        },
+    }
+
+    if compact["status"] is None and compact["root_cause"]["category"] is None:
+        return None
+    return compact
 
 
 def _extract_python_code(raw_text: str) -> str:
