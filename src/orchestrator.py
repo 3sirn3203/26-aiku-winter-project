@@ -1,12 +1,13 @@
 from __future__ import annotations
 import os
-import pandas as pd
-from typing import Dict
+from typing import Dict, List
 from google import genai
 
 from src.utils import utc_run_id
 from src.modules.profile import profiling
 from src.modules.hypothesis import generate_hypotheses
+from src.modules.implement import implement
+
 
 def _load_llm() -> genai.Client:
     api_key = os.getenv("GEMINI_API_KEY")
@@ -27,7 +28,6 @@ def run_pipeline(config: Dict) -> Dict:
     budget_cfg = fe_cfg.get("budget", {})
     profile_cfg = fe_cfg.get("profile", {})
     hypothesis_cfg = fe_cfg.get("hypothesis", {})
-    design_cfg = fe_cfg.get("design", {})
     implement_cfg = fe_cfg.get("implement", {})
     execute_cfg = fe_cfg.get("execute", {})
     diagnose_cfg = fe_cfg.get("diagnose", {})
@@ -35,11 +35,14 @@ def run_pipeline(config: Dict) -> Dict:
 
     train_path = data_cfg.get("train_path", "data/dacon/train.csv")
     test_path = data_cfg.get("test_path", "data/dacon/test.csv")
+    _ = test_path
 
     client = _load_llm()
 
     iter_num = budget_cfg.get("iterations", 3)
-    diagnose_result = None
+    diagnose_results: List[Dict] = []
+    prev_diagnose_result = None
+    iteration_summaries: List[Dict] = []
     for iteration in range(1, iter_num + 1):
         print(f"=== Iteration {iteration}/{iter_num} ===")
 
@@ -54,7 +57,7 @@ def run_pipeline(config: Dict) -> Dict:
             train_path=train_path,
             output_dir=iter_dir,
             iteration=iteration,
-            diagnose_result=diagnose_result
+            prev_diagnose_result=prev_diagnose_result
         )
 
         # 2. Hypothesis Generation
@@ -66,14 +69,44 @@ def run_pipeline(config: Dict) -> Dict:
             output_dir=iter_dir,
         )
 
-        # 3. Design
-        # design_result = design(client, design_cfg, hypotheses)
+        # 3. Implement
+        print("  Step 3: Implement")
+        implement_result = implement(
+            client=client, 
+            implement_cfg=implement_cfg, 
+            profile_result=profile_result,
+            hypotheses=hypotheses,
+            output_dir=iter_dir
+        )
+        iteration_summaries.append(
+            {
+                "iteration": iteration,
+                "profile_path": os.path.join(iter_dir, "profile", "profile.json"),
+                "hypothesis_path": os.path.join(iter_dir, "hypothesis", "hypothesis.json"),
+                "implement_summary_path": os.path.join(iter_dir, "implement", "implement_summary.json"),
+            }
+        )
 
-        # 4. Implement
-        # implement_result = implement(client, implement_cfg, design_result)
-
-        # 5. Execute
+        # 4. Execute
         # execute_result = execute(client, execute_cfg, implement_result, train_path)
 
-        # 6. Diagnose
+        # 5. Diagnose
         # diagnose_result = diagnose(client, diagnose_cfg, execute_result)
+        # diagnose_results.append(diagnose_result)
+        # prev_diagnose_result = diagnose_result
+
+    # 6. Report
+    _ = execute_cfg
+    _ = diagnose_cfg
+    _ = report_cfg
+    _ = diagnose_results
+    return {
+        "run_id": run_id,
+        "run_dir": run_dir,
+        "iterations": iteration_summaries,
+        "best_summary": {
+            "iteration": iteration_summaries[-1]["iteration"] if iteration_summaries else 0,
+            "mean_cv": 0.0,
+            "std_cv": 0.0,
+        },
+    }

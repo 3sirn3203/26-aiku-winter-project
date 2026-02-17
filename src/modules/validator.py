@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import importlib.util
+from pathlib import Path
+from types import ModuleType
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import numpy as np
@@ -17,275 +20,139 @@ from sklearn.metrics import (
 from sklearn.model_selection import KFold, StratifiedKFold
 from sklearn.preprocessing import LabelEncoder
 
-import src.feature_engineering as default_fe_module
+
+class _DefaultPreprocessor:
+    @staticmethod
+    def fit_preprocessor(train_df: pd.DataFrame, label_col: str, config: Dict[str, Any]) -> Dict[str, Any]:
+        del label_col, config
+        return {"columns": [str(col) for col in train_df.columns]}
+
+    @staticmethod
+    def transform_preprocessor(df: pd.DataFrame, prep_state: Dict[str, Any], config: Dict[str, Any]) -> pd.DataFrame:
+        del prep_state, config
+        return df.copy()
+
+
+class _DefaultFeatureEngineering:
+    FEATURE_BLOCKS = {"identity": {"description": "No feature engineering", "enabled_by_default": True}}
+
+    @staticmethod
+    def fit_feature_engineering(
+        train_df: pd.DataFrame,
+        label_col: str,
+        config: Dict[str, Any],
+        enabled_blocks: Optional[Iterable[str]] = None,
+    ) -> Dict[str, Any]:
+        del config
+        blocks = list(enabled_blocks) if enabled_blocks is not None else ["identity"]
+        feature_cols = [str(col) for col in train_df.columns if str(col) != str(label_col)]
+        return {"feature_cols": feature_cols, "enabled_blocks": blocks}
+
+    @staticmethod
+    def transform_feature_engineering(df: pd.DataFrame, fe_state: Dict[str, Any], config: Dict[str, Any]) -> pd.DataFrame:
+        del config
+        feature_cols = [col for col in fe_state.get("feature_cols", []) if col in df.columns]
+        out = df.loc[:, feature_cols].copy()
+        return out
+
+    @staticmethod
+    def feature_registry_from_state(fe_state: Dict[str, Any]) -> List[Dict[str, Any]]:
+        return [
+            {"feature": col, "block": "identity"}
+            for col in fe_state.get("feature_cols", [])
+        ]
+
+
+def load_preprocessor_module(module_path: Optional[str]) -> Any:
+    if module_path is None:
+        return _DefaultPreprocessor()
+    module = _load_module_from_path(module_path, "generated_preprocessor")
+    _assert_module_functions(module, ["fit_preprocessor", "transform_preprocessor"], "preprocessor")
+    return module
+
+
+def load_feature_engineering_module(module_path: Optional[str]) -> Any:
+    if module_path is None:
+        return _DefaultFeatureEngineering()
+    module = _load_module_from_path(module_path, "generated_feature_engineering")
+    _assert_module_functions(module, ["fit_feature_engineering", "transform_feature_engineering"], "feature_engineering")
+    return module
 
 
 def higher_is_better(metric: str) -> bool:
-    metric = metric.lower()
-    return metric in {"f1", "accuracy", "roc_auc", "auc", "r2"}
-
-
-def _build_splitter(
-    task_type: str,
-    cv_type: str,
-    n_splits: int,
-    shuffle: bool,
-    random_state: int,
-) -> Tuple[Any, str]:
-    cv_type = cv_type.lower()
-    task_type = task_type.lower()
-    if cv_type == "auto":
-        cv_type = "stratified" if task_type == "classification" else "kfold"
-
-    if cv_type == "stratified":
-        splitter = StratifiedKFold(n_splits=n_splits, shuffle=shuffle, random_state=random_state)
-        return splitter, "stratified"
-
-    splitter = KFold(n_splits=n_splits, shuffle=shuffle, random_state=random_state)
-    return splitter, "kfold"
-
-
-def _build_model(
-    task_type: str,
-    model_type: str,
-    random_state: int,
-    model_params: Dict[str, Any],
-    n_classes: Optional[int],
-) -> Tuple[Any, str]:
-    model_type = model_type.lower()
-    params = dict(model_params)
-
-    if model_type == "xgboost":
-        try:
-            import xgboost as xgb
-
-            if task_type == "classification":
-                default = {
-                    "n_estimators": 300,
-                    "max_depth": 6,
-                    "learning_rate": 0.05,
-                    "subsample": 0.9,
-                    "colsample_bytree": 0.9,
-                    "random_state": random_state,
-                    "n_jobs": -1,
-                    "tree_method": "hist",
-                    "eval_metric": "logloss",
-                }
-                if n_classes and n_classes > 2:
-                    default["objective"] = "multi:softprob"
-                    default["num_class"] = n_classes
-                    default["eval_metric"] = "mlogloss"
-                else:
-                    default["objective"] = "binary:logistic"
-                default.update(params)
-                return xgb.XGBClassifier(**default), "xgboost"
-
-            default = {
-                "n_estimators": 300,
-                "max_depth": 6,
-                "learning_rate": 0.05,
-                "subsample": 0.9,
-                "colsample_bytree": 0.9,
-                "random_state": random_state,
-                "n_jobs": -1,
-                "tree_method": "hist",
-                "objective": "reg:squarederror",
-                "eval_metric": "rmse",
-            }
-            default.update(params)
-            return xgb.XGBRegressor(**default), "xgboost"
-        except Exception:
-            pass
-
-    if model_type == "lightgbm":
-        try:
-            import lightgbm as lgb
-
-            if task_type == "classification":
-                default = {
-                    "n_estimators": 400,
-                    "learning_rate": 0.05,
-                    "num_leaves": 31,
-                    "subsample": 0.9,
-                    "colsample_bytree": 0.9,
-                    "random_state": random_state,
-                }
-                default.update(params)
-                return lgb.LGBMClassifier(**default), "lightgbm"
-
-            default = {
-                "n_estimators": 400,
-                "learning_rate": 0.05,
-                "num_leaves": 31,
-                "subsample": 0.9,
-                "colsample_bytree": 0.9,
-                "random_state": random_state,
-            }
-            default.update(params)
-            return lgb.LGBMRegressor(**default), "lightgbm"
-        except Exception:
-            pass
-
-    if task_type == "classification":
-        default = {
-            "n_estimators": 500,
-            "random_state": random_state,
-            "n_jobs": -1,
-        }
-        default.update(params)
-        return RandomForestClassifier(**default), "random_forest"
-
-    default = {
-        "n_estimators": 500,
-        "random_state": random_state,
-        "n_jobs": -1,
-    }
-    default.update(params)
-    return RandomForestRegressor(**default), "random_forest"
-
-
-def _score_classification(
-    metric: str,
-    y_true: pd.Series,
-    y_pred: np.ndarray,
-    y_proba: Optional[np.ndarray],
-    label_encoder: LabelEncoder,
-) -> float:
-    metric = metric.lower()
-    y_true_arr = y_true.astype(str).to_numpy()
-    y_pred_arr = np.asarray(y_pred).astype(str)
-    if metric == "f1":
-        if label_encoder.classes_.shape[0] == 2:
-            positive_label = str(label_encoder.classes_[1])
-            return float(f1_score(y_true_arr, y_pred_arr, average="binary", pos_label=positive_label))
-        return float(f1_score(y_true_arr, y_pred_arr, average="macro"))
-    if metric == "accuracy":
-        return float(accuracy_score(y_true_arr, y_pred_arr))
-    if metric in {"roc_auc", "auc"}:
-        if y_proba is None:
-            return float("nan")
-        y_true_enc = label_encoder.transform(y_true_arr)
-        if y_proba.ndim == 1 or y_proba.shape[1] == 1:
-            return float("nan")
-        if y_proba.shape[1] == 2:
-            return float(roc_auc_score(y_true_enc, y_proba[:, 1]))
-        return float(roc_auc_score(y_true_enc, y_proba, multi_class="ovr"))
-    if metric == "logloss":
-        if y_proba is None:
-            return float("nan")
-        y_true_enc = label_encoder.transform(y_true_arr)
-        return float(log_loss(y_true_enc, y_proba))
-    raise ValueError(f"Unsupported classification metric: {metric}")
-
-
-def _score_regression(metric: str, y_true: pd.Series, y_pred: np.ndarray) -> float:
-    metric = metric.lower()
-    if metric == "rmse":
-        return float(np.sqrt(mean_squared_error(y_true, y_pred)))
-    if metric == "mae":
-        return float(mean_absolute_error(y_true, y_pred))
-    if metric == "r2":
-        return float(r2_score(y_true, y_pred))
-    raise ValueError(f"Unsupported regression metric: {metric}")
-
-
-def _get_fe_module(fe_module: Optional[Any]) -> Any:
-    return fe_module if fe_module is not None else default_fe_module
-
-
-def _build_features_with_module(
-    fe_module: Any,
-    train_df: pd.DataFrame,
-    test_df: pd.DataFrame,
-    label_col: str,
-    config: Dict[str, Any],
-    enabled_blocks: Optional[Iterable[str]],
-) -> Tuple[pd.DataFrame, pd.Series, pd.DataFrame, Dict[str, Any]]:
-    if hasattr(fe_module, "build_features"):
-        return fe_module.build_features(
-            train_df=train_df,
-            test_df=test_df,
-            label_col=label_col,
-            config=config,
-            enabled_blocks=enabled_blocks,
-        )
-
-    fe_state = fe_module.fit_fe(
-        train_df=train_df,
-        label_col=label_col,
-        config=config,
-        enabled_blocks=enabled_blocks,
-    )
-    x_train = fe_module.transform_fe(train_df, fe_state, config=config)
-    y_train = train_df[label_col].copy()
-    x_test = fe_module.transform_fe(test_df, fe_state, config=config)
-    return x_train, y_train, x_test, fe_state
+    return metric.lower() in {"f1", "accuracy", "roc_auc", "auc", "r2"}
 
 
 def run_cross_validation(
     config: Dict[str, Any],
     train_df: pd.DataFrame,
+    preprocessor_module: Any,
+    feature_module: Any,
     enabled_blocks: Optional[Iterable[str]] = None,
-    fe_module: Optional[Any] = None,
 ) -> Dict[str, Any]:
-    fe_module = _get_fe_module(fe_module)
-    task_cfg = config["task"]
-    data_cfg = config["data"]
-    val_cfg = config["validation"]
-
-    task_type = str(task_cfg["type"]).lower()
-    metric = str(task_cfg["metric"]).lower()
-    label_col = data_cfg["label_col"]
-    model_type = str(val_cfg.get("model_type", "random_forest"))
-    model_params = val_cfg.get("model_params", {}) or {}
-    n_splits = int(val_cfg["n_splits"])
-    shuffle = bool(val_cfg["shuffle"])
-    random_state = int(val_cfg["random_state"])
+    label_col = _resolve_label_col(config=config, train_df=train_df)
+    modeling_cfg = _resolve_modeling_cfg(config)
+    task_type = modeling_cfg["task_type"]
+    metric = modeling_cfg["metric"]
+    model_type = modeling_cfg["model_type"]
+    model_params = modeling_cfg["model_params"]
+    cv_type = modeling_cfg["cv_type"]
+    n_splits = modeling_cfg["n_splits"]
+    shuffle = modeling_cfg["shuffle"]
+    random_state = modeling_cfg["random_state"]
 
     splitter, cv_type_used = _build_splitter(
         task_type=task_type,
-        cv_type=str(val_cfg.get("cv_type", "auto")),
+        cv_type=cv_type,
         n_splits=n_splits,
         shuffle=shuffle,
         random_state=random_state,
     )
 
     y_full = train_df[label_col]
-    label_encoder: Optional[LabelEncoder] = None
     y_for_split = None
     n_classes: Optional[int] = None
+    label_encoder: Optional[LabelEncoder] = None
     if task_type == "classification":
         label_encoder = LabelEncoder()
-        y_encoded = label_encoder.fit_transform(y_full.astype(str))
-        y_for_split = y_encoded
+        y_for_split = label_encoder.fit_transform(y_full.astype(str))
         n_classes = int(len(label_encoder.classes_))
 
     fold_scores: List[float] = []
     fold_details: List[Dict[str, Any]] = []
+    last_fe_state: Dict[str, Any] = {}
     model_type_used = model_type
-    last_state: Dict[str, Any] = {}
 
-    for fold_idx, (train_idx, valid_idx) in enumerate(
-        splitter.split(train_df, y_for_split if cv_type_used == "stratified" else None),
-        start=1,
-    ):
+    split_target = y_for_split if cv_type_used == "stratified" else None
+    for fold_idx, (train_idx, valid_idx) in enumerate(splitter.split(train_df, split_target), start=1):
         train_fold = train_df.iloc[train_idx].reset_index(drop=True)
         valid_fold = train_df.iloc[valid_idx].reset_index(drop=True)
 
-        fe_state = fe_module.fit_fe(
-            train_df=train_fold,
+        prep_state = preprocessor_module.fit_preprocessor(train_fold.copy(), label_col, config)
+        train_pre = preprocessor_module.transform_preprocessor(train_fold.copy(), prep_state, config)
+        valid_pre = preprocessor_module.transform_preprocessor(valid_fold.copy(), prep_state, config)
+        _assert_label_exists(train_pre, label_col, "train_preprocessed")
+        _assert_label_exists(valid_pre, label_col, "valid_preprocessed")
+
+        fe_state = feature_module.fit_feature_engineering(
+            train_df=train_pre.copy(),
             label_col=label_col,
             config=config,
             enabled_blocks=enabled_blocks,
         )
-        last_state = fe_state
-        x_train = fe_module.transform_fe(train_fold, fe_state, config=config)
-        x_valid = fe_module.transform_fe(valid_fold, fe_state, config=config)
+        last_fe_state = fe_state
+        x_train_raw = feature_module.transform_feature_engineering(train_pre.copy(), fe_state, config)
+        x_valid_raw = feature_module.transform_feature_engineering(valid_pre.copy(), fe_state, config)
+
+        x_train, x_valid = _align_and_encode_pair(x_train_raw, x_valid_raw)
 
         if task_type == "classification":
-            assert label_encoder is not None
-            y_train = label_encoder.transform(train_fold[label_col].astype(str))
-            y_valid = valid_fold[label_col].astype(str)
+            y_train_str = train_pre[label_col].astype(str)
+            y_valid_str = valid_pre[label_col].astype(str)
+            fold_encoder = LabelEncoder()
+            y_train = fold_encoder.fit_transform(y_train_str)
+            y_valid_encoded = fold_encoder.transform(y_valid_str)
+
             model, model_type_used = _build_model(
                 task_type=task_type,
                 model_type=model_type,
@@ -294,14 +161,20 @@ def run_cross_validation(
                 n_classes=n_classes,
             )
             model.fit(x_train, y_train)
-
-            pred_encoded = np.asarray(model.predict(x_valid)).astype(int)
-            y_pred = label_encoder.inverse_transform(pred_encoded)
+            y_pred_enc = np.asarray(model.predict(x_valid)).astype(int)
+            y_pred = fold_encoder.inverse_transform(y_pred_enc)
             y_proba = model.predict_proba(x_valid) if hasattr(model, "predict_proba") else None
-            score = _score_classification(metric, y_valid, y_pred, y_proba, label_encoder)
+            score = _score_classification(
+                metric=metric,
+                y_true=y_valid_str,
+                y_pred=y_pred,
+                y_proba=y_proba,
+                label_encoder=fold_encoder,
+                y_true_encoded=y_valid_encoded,
+            )
         else:
-            y_train = pd.to_numeric(train_fold[label_col], errors="coerce").fillna(0.0).to_numpy()
-            y_valid = pd.to_numeric(valid_fold[label_col], errors="coerce").fillna(0.0)
+            y_train = pd.to_numeric(train_pre[label_col], errors="coerce").fillna(0.0).to_numpy()
+            y_valid = pd.to_numeric(valid_pre[label_col], errors="coerce").fillna(0.0)
             model, model_type_used = _build_model(
                 task_type=task_type,
                 model_type=model_type,
@@ -311,7 +184,7 @@ def run_cross_validation(
             )
             model.fit(x_train, y_train)
             y_pred = np.asarray(model.predict(x_valid))
-            score = _score_regression(metric, y_valid, y_pred)
+            score = _score_regression(metric=metric, y_true=y_valid, y_pred=y_pred)
 
         fold_scores.append(float(score))
         fold_details.append(
@@ -320,6 +193,7 @@ def run_cross_validation(
                 "score": float(score),
                 "num_train_rows": int(len(train_fold)),
                 "num_valid_rows": int(len(valid_fold)),
+                "num_features": int(x_train.shape[1]),
             }
         )
 
@@ -341,11 +215,12 @@ def run_cross_validation(
         "mean_cv": mean_cv,
         "std_cv": std_cv,
         "objective_mean": objective_mean,
-        "feature_registry": (
-            fe_module.feature_registry_from_state(last_state)
-            if last_state and hasattr(fe_module, "feature_registry_from_state")
-            else []
-        ),
+        "feature_registry": _feature_registry_from_state(feature_module, last_fe_state),
+        "feature_blocks": _feature_blocks_from_module(feature_module),
+        "interface_contract": {
+            "preprocessor_required": ["fit_preprocessor", "transform_preprocessor"],
+            "feature_required": ["fit_feature_engineering", "transform_feature_engineering"],
+        },
     }
 
 
@@ -354,45 +229,50 @@ def fit_full_and_predict(
     train_df: pd.DataFrame,
     test_df: pd.DataFrame,
     sample_submission_df: pd.DataFrame,
+    preprocessor_module: Any,
+    feature_module: Any,
     enabled_blocks: Optional[Iterable[str]] = None,
-    fe_module: Optional[Any] = None,
 ) -> Dict[str, Any]:
-    fe_module = _get_fe_module(fe_module)
-    task_cfg = config["task"]
-    data_cfg = config["data"]
-    val_cfg = config["validation"]
+    label_col = _resolve_label_col(config=config, train_df=train_df, test_df=test_df, sample_submission_df=sample_submission_df)
+    id_col = _resolve_id_col(config=config, train_df=train_df, test_df=test_df, sample_submission_df=sample_submission_df)
+    modeling_cfg = _resolve_modeling_cfg(config)
+    task_type = modeling_cfg["task_type"]
+    model_type = modeling_cfg["model_type"]
+    model_params = modeling_cfg["model_params"]
+    random_state = modeling_cfg["random_state"]
 
-    task_type = str(task_cfg["type"]).lower()
-    label_col = data_cfg["label_col"]
-    id_col = data_cfg["id_col"]
-    random_state = int(val_cfg["random_state"])
-    model_type = str(val_cfg.get("model_type", "random_forest"))
-    model_params = val_cfg.get("model_params", {}) or {}
+    prep_state = preprocessor_module.fit_preprocessor(train_df.copy(), label_col, config)
+    train_pre = preprocessor_module.transform_preprocessor(train_df.copy(), prep_state, config)
+    test_pre = preprocessor_module.transform_preprocessor(test_df.copy(), prep_state, config)
+    _assert_label_exists(train_pre, label_col, "train_preprocessed")
 
-    x_train, y_train_raw, x_test, fe_state = _build_features_with_module(
-        fe_module=fe_module,
-        train_df=train_df,
-        test_df=test_df,
+    fe_state = feature_module.fit_feature_engineering(
+        train_df=train_pre.copy(),
         label_col=label_col,
         config=config,
         enabled_blocks=enabled_blocks,
     )
+    x_train_raw = feature_module.transform_feature_engineering(train_pre.copy(), fe_state, config)
+    x_test_raw = feature_module.transform_feature_engineering(test_pre.copy(), fe_state, config)
+    x_train, x_test = _align_and_encode_pair(x_train_raw, x_test_raw)
 
     if task_type == "classification":
+        y_train_str = train_pre[label_col].astype(str)
         label_encoder = LabelEncoder()
-        y_train = label_encoder.fit_transform(y_train_raw.astype(str))
+        y_train = label_encoder.fit_transform(y_train_str)
+        n_classes = int(len(label_encoder.classes_))
         model, model_type_used = _build_model(
             task_type=task_type,
             model_type=model_type,
             random_state=random_state,
             model_params=model_params,
-            n_classes=int(len(label_encoder.classes_)),
+            n_classes=n_classes,
         )
         model.fit(x_train, y_train)
         pred_encoded = np.asarray(model.predict(x_test)).astype(int)
         y_test_pred = label_encoder.inverse_transform(pred_encoded)
     else:
-        y_train = pd.to_numeric(y_train_raw, errors="coerce").fillna(0.0).to_numpy()
+        y_train = pd.to_numeric(train_pre[label_col], errors="coerce").fillna(0.0).to_numpy()
         model, model_type_used = _build_model(
             task_type=task_type,
             model_type=model_type,
@@ -404,13 +284,289 @@ def fit_full_and_predict(
         y_test_pred = np.asarray(model.predict(x_test))
 
     submission = sample_submission_df.copy()
-    if id_col in test_df.columns:
+    if id_col is not None and id_col in test_df.columns and id_col in submission.columns:
         submission[id_col] = test_df[id_col].values
     submission[label_col] = y_test_pred
 
     return {
-        "model": model,
-        "fe_state": fe_state,
         "submission_df": submission,
         "model_type_used": model_type_used,
+        "fe_state": fe_state,
+        "feature_registry": _feature_registry_from_state(feature_module, fe_state),
     }
+
+
+def _resolve_modeling_cfg(config: Dict[str, Any]) -> Dict[str, Any]:
+    modeling = config.get("modeling", {}) or {}
+    validation = modeling.get("validation", {}) or {}
+    model = modeling.get("model", {}) or {}
+    return {
+        "task_type": str(modeling.get("task_type", "regression")).lower(),
+        "metric": str(modeling.get("metric", "rmse")).lower(),
+        "cv_type": str(validation.get("cv_type", "auto")).lower(),
+        "n_splits": int(validation.get("n_splits", 5)),
+        "shuffle": bool(validation.get("shuffle", True)),
+        "random_state": int(validation.get("random_state", 42)),
+        "model_type": str(model.get("type", "random_forest")).lower(),
+        "model_params": dict(model.get("params", {}) or {}),
+    }
+
+
+def _resolve_label_col(
+    config: Dict[str, Any],
+    train_df: pd.DataFrame,
+    test_df: Optional[pd.DataFrame] = None,
+    sample_submission_df: Optional[pd.DataFrame] = None,
+) -> str:
+    data_cfg = config.get("data", {}) or {}
+    configured = data_cfg.get("label_col")
+    if configured is not None:
+        return str(configured)
+
+    if sample_submission_df is not None and test_df is not None:
+        candidate = [col for col in sample_submission_df.columns if col not in test_df.columns]
+        if len(candidate) == 1:
+            return str(candidate[0])
+        if len(sample_submission_df.columns) >= 2:
+            return str(sample_submission_df.columns[-1])
+
+    return str(train_df.columns[-1])
+
+
+def _resolve_id_col(
+    config: Dict[str, Any],
+    train_df: pd.DataFrame,
+    test_df: pd.DataFrame,
+    sample_submission_df: Optional[pd.DataFrame] = None,
+) -> Optional[str]:
+    data_cfg = config.get("data", {}) or {}
+    configured = data_cfg.get("id_col")
+    if configured is not None:
+        return str(configured)
+
+    if sample_submission_df is not None:
+        for col in sample_submission_df.columns:
+            if col in test_df.columns:
+                return str(col)
+
+    for col in test_df.columns:
+        if col in train_df.columns:
+            return str(col)
+    return None
+
+
+def _build_splitter(
+    task_type: str,
+    cv_type: str,
+    n_splits: int,
+    shuffle: bool,
+    random_state: int,
+) -> Tuple[Any, str]:
+    if cv_type == "auto":
+        cv_type = "stratified" if task_type == "classification" else "kfold"
+    if cv_type == "stratified":
+        return StratifiedKFold(n_splits=n_splits, shuffle=shuffle, random_state=random_state), "stratified"
+    return KFold(n_splits=n_splits, shuffle=shuffle, random_state=random_state), "kfold"
+
+
+def _build_model(
+    task_type: str,
+    model_type: str,
+    random_state: int,
+    model_params: Dict[str, Any],
+    n_classes: Optional[int],
+) -> Tuple[Any, str]:
+    params = dict(model_params)
+    if model_type == "xgboost":
+        try:
+            import xgboost as xgb
+
+            if task_type == "classification":
+                defaults: Dict[str, Any] = {
+                    "n_estimators": 300,
+                    "max_depth": 6,
+                    "learning_rate": 0.05,
+                    "subsample": 0.9,
+                    "colsample_bytree": 0.9,
+                    "random_state": random_state,
+                    "n_jobs": -1,
+                    "tree_method": "hist",
+                    "eval_metric": "logloss",
+                }
+                if n_classes is not None and n_classes > 2:
+                    defaults["objective"] = "multi:softprob"
+                    defaults["num_class"] = n_classes
+                    defaults["eval_metric"] = "mlogloss"
+                else:
+                    defaults["objective"] = "binary:logistic"
+                defaults.update(params)
+                return xgb.XGBClassifier(**defaults), "xgboost"
+
+            defaults = {
+                "n_estimators": 300,
+                "max_depth": 6,
+                "learning_rate": 0.05,
+                "subsample": 0.9,
+                "colsample_bytree": 0.9,
+                "random_state": random_state,
+                "n_jobs": -1,
+                "tree_method": "hist",
+                "objective": "reg:squarederror",
+                "eval_metric": "rmse",
+            }
+            defaults.update(params)
+            return xgb.XGBRegressor(**defaults), "xgboost"
+        except Exception:
+            pass
+
+    if model_type == "lightgbm":
+        try:
+            import lightgbm as lgb
+
+            if task_type == "classification":
+                defaults = {
+                    "n_estimators": 400,
+                    "learning_rate": 0.05,
+                    "num_leaves": 31,
+                    "subsample": 0.9,
+                    "colsample_bytree": 0.9,
+                    "random_state": random_state,
+                }
+                defaults.update(params)
+                return lgb.LGBMClassifier(**defaults), "lightgbm"
+
+            defaults = {
+                "n_estimators": 400,
+                "learning_rate": 0.05,
+                "num_leaves": 31,
+                "subsample": 0.9,
+                "colsample_bytree": 0.9,
+                "random_state": random_state,
+            }
+            defaults.update(params)
+            return lgb.LGBMRegressor(**defaults), "lightgbm"
+        except Exception:
+            pass
+
+    if task_type == "classification":
+        defaults = {"n_estimators": 500, "random_state": random_state, "n_jobs": -1}
+        defaults.update(params)
+        return RandomForestClassifier(**defaults), "random_forest"
+    defaults = {"n_estimators": 500, "random_state": random_state, "n_jobs": -1}
+    defaults.update(params)
+    return RandomForestRegressor(**defaults), "random_forest"
+
+
+def _score_classification(
+    metric: str,
+    y_true: pd.Series,
+    y_pred: np.ndarray,
+    y_proba: Optional[np.ndarray],
+    label_encoder: LabelEncoder,
+    y_true_encoded: np.ndarray,
+) -> float:
+    metric = metric.lower()
+    y_true_arr = y_true.astype(str).to_numpy()
+    y_pred_arr = np.asarray(y_pred).astype(str)
+    if metric == "f1":
+        if label_encoder.classes_.shape[0] == 2:
+            positive_label = str(label_encoder.classes_[1])
+            return float(f1_score(y_true_arr, y_pred_arr, average="binary", pos_label=positive_label))
+        return float(f1_score(y_true_arr, y_pred_arr, average="macro"))
+    if metric == "accuracy":
+        return float(accuracy_score(y_true_arr, y_pred_arr))
+    if metric in {"roc_auc", "auc"}:
+        if y_proba is None:
+            return float("nan")
+        if y_proba.ndim == 1 or y_proba.shape[1] == 1:
+            return float("nan")
+        if y_proba.shape[1] == 2:
+            return float(roc_auc_score(y_true_encoded, y_proba[:, 1]))
+        return float(roc_auc_score(y_true_encoded, y_proba, multi_class="ovr"))
+    if metric == "logloss":
+        if y_proba is None:
+            return float("nan")
+        return float(log_loss(y_true_encoded, y_proba))
+    raise ValueError(f"Unsupported classification metric: {metric}")
+
+
+def _score_regression(metric: str, y_true: pd.Series, y_pred: np.ndarray) -> float:
+    metric = metric.lower()
+    if metric == "rmse":
+        return float(np.sqrt(mean_squared_error(y_true, y_pred)))
+    if metric == "mae":
+        return float(mean_absolute_error(y_true, y_pred))
+    if metric == "r2":
+        return float(r2_score(y_true, y_pred))
+    raise ValueError(f"Unsupported regression metric: {metric}")
+
+
+def _align_and_encode_pair(train_df: pd.DataFrame, other_df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    train = _ensure_dataframe(train_df)
+    other = _ensure_dataframe(other_df)
+    train.columns = [str(col) for col in train.columns]
+    other.columns = [str(col) for col in other.columns]
+    other = other.reindex(columns=train.columns)
+
+    train_out = pd.DataFrame(index=train.index)
+    other_out = pd.DataFrame(index=other.index)
+    for col in train.columns:
+        s_train = train[col]
+        s_other = other[col]
+        if pd.api.types.is_numeric_dtype(s_train):
+            train_out[col] = pd.to_numeric(s_train, errors="coerce").fillna(0.0)
+            other_out[col] = pd.to_numeric(s_other, errors="coerce").fillna(0.0)
+        else:
+            train_str = s_train.astype("string").fillna("__NA__")
+            categories = pd.Index(train_str.unique())
+            other_str = s_other.astype("string").fillna("__NA__")
+            train_out[col] = pd.Categorical(train_str, categories=categories).codes.astype(float)
+            other_out[col] = pd.Categorical(other_str, categories=categories).codes.astype(float)
+    return train_out, other_out
+
+
+def _ensure_dataframe(df: Any) -> pd.DataFrame:
+    if isinstance(df, pd.DataFrame):
+        return df.copy()
+    return pd.DataFrame(df)
+
+
+def _feature_registry_from_state(feature_module: Any, fe_state: Dict[str, Any]) -> List[Dict[str, Any]]:
+    if fe_state and hasattr(feature_module, "feature_registry_from_state"):
+        try:
+            registry = feature_module.feature_registry_from_state(fe_state)
+            if isinstance(registry, list):
+                return registry
+        except Exception:
+            pass
+    return []
+
+
+def _feature_blocks_from_module(feature_module: Any) -> Dict[str, Any]:
+    blocks = getattr(feature_module, "FEATURE_BLOCKS", None)
+    if isinstance(blocks, dict):
+        return blocks
+    return {}
+
+
+def _assert_label_exists(df: pd.DataFrame, label_col: str, stage_name: str) -> None:
+    if label_col not in df.columns:
+        raise ValueError(f"{stage_name} must contain label column '{label_col}'")
+
+
+def _load_module_from_path(module_path: str, module_name: str) -> ModuleType:
+    path = Path(module_path)
+    if not path.exists():
+        raise FileNotFoundError(f"Module path not found: {path}")
+    spec = importlib.util.spec_from_file_location(module_name, str(path))
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Unable to load module spec: {path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _assert_module_functions(module: Any, required_functions: List[str], module_label: str) -> None:
+    missing = [name for name in required_functions if not hasattr(module, name)]
+    if missing:
+        raise ValueError(f"{module_label} module missing required function(s): {missing}")

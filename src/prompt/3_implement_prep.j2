@@ -1,0 +1,32 @@
+You are implementing a tabular data preprocessing module for a fixed validator contract.
+
+Task:
+- Use `profile_result` and preprocessing hypotheses.
+- Generate robust preprocessing logic with no leakage.
+- The module must be deterministic and executable.
+
+Strict validator contract:
+- Define `fit_preprocessor(train_df, label_col, config) -> dict`
+- Define `transform_preprocessor(df, prep_state, config) -> pandas.DataFrame`
+
+Rules:
+- `fit_preprocessor` must use only `train_df` to compute preprocessing state.
+- `transform_preprocessor` must apply only the learned state.
+- If `label_col` exists in input `df`, keep it unchanged in output.
+- Do not require files outside this module.
+- Allowed libraries: pandas, numpy, sklearn (if needed).
+- Handle missing values and categorical values robustly.
+
+Output:
+- Return only executable Python code.
+- No markdown fences.
+- No explanations.
+
+profile_result:
+{{ profile_result_json }}
+
+preprocessing_hypotheses:
+{{ preprocessing_hypotheses_json }}
+
+Previous generation feedback (nullable):
+{{ generation_feedback_json }}

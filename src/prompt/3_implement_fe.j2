@@ -1,0 +1,35 @@
+You are implementing a tabular feature engineering module for a fixed validator contract.
+
+Task:
+- Use `profile_result` and feature engineering hypotheses.
+- Generate robust feature engineering logic with no leakage.
+- The module must be deterministic and executable.
+
+Strict validator contract:
+- Define `fit_feature_engineering(train_df, label_col, config, enabled_blocks=None) -> dict`
+- Define `transform_feature_engineering(df, fe_state, config) -> pandas.DataFrame`
+- Optional: `feature_registry_from_state(fe_state) -> list`
+- Optional: `FEATURE_BLOCKS` dictionary for block metadata
+
+Rules:
+- `fit_feature_engineering` must use only `train_df`.
+- `transform_feature_engineering` must apply only learned state from `fe_state`.
+- Return features only from `transform_feature_engineering`.
+- Exclude `label_col` from transformed feature output.
+- Ensure stable output schema between train/valid/test.
+- If `enabled_blocks` is provided, only those blocks must be active.
+- Allowed libraries: pandas, numpy, sklearn (if needed).
+
+Output:
+- Return only executable Python code.
+- No markdown fences.
+- No explanations.
+
+profile_result:
+{{ profile_result_json }}
+
+feature_engineering_hypotheses:
+{{ feature_hypotheses_json }}
+
+Previous generation feedback (nullable):
+{{ generation_feedback_json }}

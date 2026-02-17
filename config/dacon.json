@@ -24,11 +24,13 @@
             "top_p": 0.9,
             "max_attempts": 2
         },
-        "design": {
-
-        },
         "implement": {
-
+            "model": "gemini-2.5-flash",
+            "temperature": 0.2,
+            "max_tokens": 8192,
+            "top_p": 0.9,
+            "max_codegen_attempts": 2,
+            "syntax_check": true
         },
         "execute": {
 
@@ -41,6 +43,17 @@
         }
     },
     "modeling": {
-
+        "task_type": "regression",
+        "metric": "rmse",
+        "validation": {
+            "cv_type": "auto",
+            "n_splits": 5,
+            "shuffle": true,
+            "random_state": 42
+        },
+        "model": {
+            "type": "lightgbm",
+            "params": {}
+        }
     }
 }

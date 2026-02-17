@@ -26,8 +26,9 @@ def profiling(
     train_path: str,
     output_dir: str,
     iteration: int,
-    diagnose_result: Optional[Dict[str, Any]] = None,
+    prev_diagnose_result: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
+    
     profile_dir = os.path.join(output_dir, "profile")
     os.makedirs(profile_dir, exist_ok=True)
 
@@ -55,7 +56,7 @@ def profiling(
     for attempt in range(1, max_codegen_attempts + 1):
         prompt = prompt_template.render(
             dataset_context=json.dumps(dataset_context, ensure_ascii=False),
-            previous_diagnose_json=json.dumps(diagnose_result, ensure_ascii=False) if diagnose_result is not None else "null",
+            previous_diagnose_json=json.dumps(prev_diagnose_result, ensure_ascii=False) if prev_diagnose_result is not None else "null",
             execution_feedback_json=json.dumps(execution_feedback, ensure_ascii=False) if execution_feedback is not None else "null",
         )
 
