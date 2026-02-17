@@ -10,7 +10,7 @@
   - [ ] `num_bag_sets`, `num_stack_levels` (선택)
 - [ ] `fit` 섹션 추가: AutoGluon `fit()`에 전달할 하이퍼파라미터 관리
 
-## 2) 실행 스크립트 구현 (`baseline_autogluon.py`)
+## 2) 실행 스크립트 구현 (`baseline.py`)
 - [ ] `--config` 인자 로딩 및 유효성 검증
 - [ ] train/test/sample_submission CSV 로드
 - [ ] config 기반으로 `TabularPredictor` 초기화

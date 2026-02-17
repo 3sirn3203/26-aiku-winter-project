@@ -41,6 +41,10 @@ def build_fit_kwargs(config):
     if time_limit is not None:
         fit_kwargs["time_limit"] = time_limit
 
+    num_gpus = model_cfg.get("num_gpus")
+    if num_gpus is not None:
+        fit_kwargs["num_gpus"] = num_gpus
+
     validation_method = validation_cfg.get("method", "holdout")
     if validation_method == "holdout":
         fit_kwargs["holdout_frac"] = validation_cfg.get("holdout_frac", 0.2)
@@ -53,7 +57,15 @@ def build_fit_kwargs(config):
 
     fit_kwargs.update(fit_cfg)
 
-    valid_fit_params = set(inspect.signature(TabularPredictor.fit).parameters.keys())
+    fit_signature = inspect.signature(TabularPredictor.fit)
+    accepts_var_kwargs = any(
+        param.kind == inspect.Parameter.VAR_KEYWORD
+        for param in fit_signature.parameters.values()
+    )
+    if accepts_var_kwargs:
+        return fit_kwargs
+
+    valid_fit_params = set(fit_signature.parameters.keys())
     filtered_kwargs = {}
     ignored_keys = []
     for key, value in fit_kwargs.items():
