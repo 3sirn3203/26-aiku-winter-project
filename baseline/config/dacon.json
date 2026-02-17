@@ -3,7 +3,7 @@
     "train_path": "data/dacon/train.csv",
     "test_path": "data/dacon/test.csv",
     "sample_submission_path": "data/dacon/sample_submission.csv",
-    "output_path": "baseline/generated/submission_dacon.csv",
+    "output_path": "baseline/generated/dacon_ver1",
     "id_col": "ID",
     "label_col": "completed"
   },
@@ -15,11 +15,8 @@
     "num_gpus": 2
   },
   "validation": {
-    "method": "holdout",
     "holdout_frac": 0.2,
-    "num_bag_folds": 5,
-    "num_bag_sets": 1,
-    "num_stack_levels": 0
+    "random_state": 42
   },
   "fit": {
     "hyperparameters": "default",

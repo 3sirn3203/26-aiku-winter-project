@@ -20,7 +20,8 @@ python baseline/baseline.py --config baseline/config/dacon.json
 ```
 
 결과 파일:
-- `baseline/generated/submission_dacon.csv`
+- `baseline/generated/dacon_ver1/model/`
+- `baseline/generated/dacon_ver1/submission.csv`
 
 ### Kaggle
 
@@ -29,7 +30,8 @@ python baseline/baseline.py --config baseline/config/kaggle.json
 ```
 
 결과 파일:
-- `baseline/generated/submission_kaggle.csv`
+- `baseline/generated/kaggle_ver1/model/`
+- `baseline/generated/kaggle_ver1/submission.csv`
 
 ## 3. Config 구조
 
@@ -41,7 +43,7 @@ python baseline/baseline.py --config baseline/config/kaggle.json
     "train_path": "data/dacon/train.csv",
     "test_path": "data/dacon/test.csv",
     "sample_submission_path": "data/dacon/sample_submission.csv",
-    "output_path": "baseline/generated/submission_dacon.csv",
+    "output_path": "baseline/generated/dacon_ver1",
     "id_col": "ID",
     "label_col": "completed"
   },
@@ -53,11 +55,8 @@ python baseline/baseline.py --config baseline/config/kaggle.json
     "num_gpus": 0
   },
   "validation": {
-    "method": "holdout",
     "holdout_frac": 0.2,
-    "num_bag_folds": 5,
-    "num_bag_sets": 1,
-    "num_stack_levels": 0
+    "random_state": 42
   },
   "fit": {
     "hyperparameters": "default",
@@ -66,13 +65,14 @@ python baseline/baseline.py --config baseline/config/kaggle.json
 }
 ```
 
-## 4. Holdout / CV 전환
+## 4. Holdout 검증
 
-- `validation.method = "holdout"`
-  - `holdout_frac` 사용
-- `validation.method = "cv"`
-  - AutoGluon bagging 기반 CV 사용
-  - `num_bag_folds`, `num_bag_sets`, `num_stack_levels` 사용
+- 현재 baseline은 holdout만 사용합니다.
+- `validation.holdout_frac` 비율로 train을 직접 분할하여
+  - `train_data`
+  - `tuning_data`
+  로 `fit()`에 전달합니다.
+- `validation.random_state`로 split 재현성을 제어합니다.
 
 ## 5. 하이퍼파라미터 관리
 
@@ -81,4 +81,5 @@ python baseline/baseline.py --config baseline/config/kaggle.json
   - 예: `hyperparameters`, `included_model_types`, `excluded_model_types` 등
   - `TabularPredictor.fit()`에서 지원하지 않는 키는 경고 후 무시됩니다.
 - GPU 사용 시 `model.num_gpus`를 `1` 이상으로 설정합니다.
-- CV에서 fold 병렬 이슈를 줄이려면 `fit.fit_strategy`를 `sequential`로 사용합니다.
+- `output_path`는 파일이 아니라 실행 결과 디렉토리입니다.
+  - 이미 같은 경로가 존재하면 에러를 발생시킵니다.

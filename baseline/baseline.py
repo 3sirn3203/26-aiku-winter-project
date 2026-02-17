@@ -27,9 +27,28 @@ def infer_label_col(train_df, sample_submission_df, id_col):
     raise ValueError("Unable to infer label column. Please set data.label_col in config.")
 
 
+def split_holdout(train_df, holdout_frac, random_state):
+    if not 0 < holdout_frac < 1:
+        raise ValueError("validation.holdout_frac must be between 0 and 1.")
+    if len(train_df) < 2:
+        raise ValueError("Train data must have at least 2 rows for holdout split.")
+
+    tuning_df = train_df.sample(frac=holdout_frac, random_state=random_state)
+    train_only_df = train_df.drop(index=tuning_df.index)
+
+    # Ensure both partitions are non-empty even on edge-case sizes.
+    if tuning_df.empty or train_only_df.empty:
+        tuning_size = int(round(len(train_df) * holdout_frac))
+        tuning_size = max(1, min(len(train_df) - 1, tuning_size))
+        shuffled = train_df.sample(frac=1.0, random_state=random_state)
+        tuning_df = shuffled.iloc[:tuning_size]
+        train_only_df = shuffled.iloc[tuning_size:]
+
+    return train_only_df.reset_index(drop=True), tuning_df.reset_index(drop=True)
+
+
 def build_fit_kwargs(config):
     model_cfg = config.get("model", {})
-    validation_cfg = config.get("validation", {})
     fit_cfg = config.get("fit", {})
 
     fit_kwargs = {}
@@ -45,15 +64,9 @@ def build_fit_kwargs(config):
     if num_gpus is not None:
         fit_kwargs["num_gpus"] = num_gpus
 
-    validation_method = validation_cfg.get("method", "holdout")
-    if validation_method == "holdout":
-        fit_kwargs["holdout_frac"] = validation_cfg.get("holdout_frac", 0.2)
-    elif validation_method == "cv":
-        fit_kwargs["num_bag_folds"] = validation_cfg.get("num_bag_folds", 5)
-        fit_kwargs["num_bag_sets"] = validation_cfg.get("num_bag_sets", 1)
-        fit_kwargs["num_stack_levels"] = validation_cfg.get("num_stack_levels", 0)
-    else:
-        raise ValueError("validation.method must be one of ['holdout', 'cv']")
+    # Force holdout-only flow by default (no bagging/cv stack).
+    fit_kwargs["num_bag_folds"] = 0
+    fit_kwargs["num_stack_levels"] = 0
 
     fit_kwargs.update(fit_cfg)
 
@@ -96,8 +109,17 @@ def main():
         "sample_submission_path",
         data_cfg.get("submission_path", "data/dacon/sample_submission.csv"),
     )
-    output_path = data_cfg.get("output_path", "baseline/generated/submission_dacon.csv")
+    output_path = data_cfg.get("output_path", "baseline/generated/dacon_ver1")
     id_col = data_cfg.get("id_col", "ID")
+    validation_cfg = config.get("validation", {})
+    holdout_frac = validation_cfg.get("holdout_frac", 0.2)
+    random_state = validation_cfg.get("random_state", 42)
+
+    if os.path.exists(output_path):
+        raise FileExistsError(f"Output directory already exists: {output_path}")
+    os.makedirs(output_path, exist_ok=False)
+    model_path = os.path.join(output_path, "model")
+    submission_path = os.path.join(output_path, "submission.csv")
 
     train_df = load_csv(train_path)
     test_df = load_csv(test_path)
@@ -114,10 +136,11 @@ def main():
     model_cfg = config.get("model", {})
     eval_metric = model_cfg.get("eval_metric")
     problem_type = model_cfg.get("problem_type")
-    model_path = model_cfg.get("path")
-    if model_path is None:
-        output_stem = os.path.splitext(os.path.basename(output_path))[0]
-        model_path = os.path.join("baseline", "generated", f"model_{output_stem}")
+    train_only_df, tuning_df = split_holdout(
+        train_df=train_df,
+        holdout_frac=holdout_frac,
+        random_state=random_state,
+    )
 
     fit_kwargs = build_fit_kwargs(config)
 
@@ -127,7 +150,7 @@ def main():
         problem_type=problem_type,
         path=model_path,
     )
-    predictor.fit(train_data=train_df, **fit_kwargs)
+    predictor.fit(train_data=train_only_df, tuning_data=tuning_df, **fit_kwargs)
 
     predictions = predictor.predict(test_df)
 
@@ -136,11 +159,9 @@ def main():
         submission_df[id_col] = test_df[id_col].values
     submission_df[label_col] = predictions.values
 
-    output_dir = os.path.dirname(output_path)
-    if output_dir:
-        os.makedirs(output_dir, exist_ok=True)
-    submission_df.to_csv(output_path, index=False, encoding="utf-8-sig")
-    print(f"[INFO] Submission saved to: {output_path}")
+    submission_df.to_csv(submission_path, index=False, encoding="utf-8-sig")
+    print(f"[INFO] Model saved to: {model_path}")
+    print(f"[INFO] Submission saved to: {submission_path}")
 
 
 if __name__ == "__main__":
