@@ -6,7 +6,7 @@
     },
     "feature_engineering": {
         "budget": {
-            "iterations": 1,
+            "iterations": 2,
             "time_limit_per_iteration": 1800
         },
         "profile": {
@@ -51,14 +51,22 @@
             "metric": null
         },
         "diagnose": {
+            "model": "gemini-2.5-flash",
+            "temperature": 0.2,
+            "top_p": 0.9,
+            "max_tokens": 4096,
+            "max_attempts": 2,
             "max_log_tail_chars": 4000,
+            "prompt_log_tail_chars": 2000,
             "std_warning_threshold": 0.02,
             "feature_count_warning_threshold": 700
         },
         "report": {
             "output_dir": "",
             "report_filename": "report.html",
-            "report_json_filename": "report.json"
+            "report_json_filename": "report.json",
+            "feature_preview_limit": 30,
+            "feature_store_limit": 300
         }
     },
     "submission": {

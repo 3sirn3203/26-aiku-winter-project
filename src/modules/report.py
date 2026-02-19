@@ -4,13 +4,14 @@ import datetime as dt
 import html
 import json
 import os
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence, Set
 
 
 def make_report(
     report_cfg: Dict[str, Any],
     diagnose_results: List[Dict[str, Any]],
     iteration_summaries: List[Dict[str, Any]],
+    execute_results: List[Dict[str, Any]],
     run_dir: str,
     best_summary: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
@@ -26,8 +27,18 @@ def make_report(
     report_path = os.path.join(report_dir, report_filename)
     report_json_path = os.path.join(report_dir, report_json_filename)
 
+    feature_preview_limit = int(report_cfg.get("feature_preview_limit", 30))
+    feature_store_limit = int(report_cfg.get("feature_store_limit", 300))
+
     by_iter_diagnose = _index_by_iteration(diagnose_results)
-    merged_rows = _merge_iteration_rows(iteration_summaries, by_iter_diagnose)
+    by_iter_execute = _index_by_iteration(execute_results)
+    merged_rows = _merge_iteration_rows(
+        iteration_summaries=iteration_summaries,
+        by_iter_diagnose=by_iter_diagnose,
+        by_iter_execute=by_iter_execute,
+        feature_preview_limit=feature_preview_limit,
+        feature_store_limit=feature_store_limit,
+    )
 
     total_iterations = len(merged_rows)
     success_count = sum(1 for row in merged_rows if bool(row.get("success", False)))
@@ -61,6 +72,8 @@ def make_report(
 def _index_by_iteration(rows: List[Dict[str, Any]]) -> Dict[int, Dict[str, Any]]:
     indexed: Dict[int, Dict[str, Any]] = {}
     for row in rows:
+        if not isinstance(row, dict):
+            continue
         try:
             key = int(row.get("iteration"))
         except Exception:
@@ -72,9 +85,15 @@ def _index_by_iteration(rows: List[Dict[str, Any]]) -> Dict[int, Dict[str, Any]]
 def _merge_iteration_rows(
     iteration_summaries: List[Dict[str, Any]],
     by_iter_diagnose: Dict[int, Dict[str, Any]],
+    by_iter_execute: Dict[int, Dict[str, Any]],
+    feature_preview_limit: int,
+    feature_store_limit: int,
 ) -> List[Dict[str, Any]]:
     merged: List[Dict[str, Any]] = []
-    for row in iteration_summaries:
+    previous_feature_set: Set[str] = set()
+
+    sorted_summaries = sorted(iteration_summaries, key=lambda x: int(x.get("iteration", 0)))
+    for row in sorted_summaries:
         item = dict(row)
         try:
             iteration = int(item.get("iteration"))
@@ -82,10 +101,18 @@ def _merge_iteration_rows(
             iteration = None
 
         diagnose = by_iter_diagnose.get(iteration, {})
+        execute = by_iter_execute.get(iteration, {})
+
         root_cause = diagnose.get("root_cause", {}) if isinstance(diagnose, dict) else {}
         feedback = diagnose.get("feedback_for_next_iteration", {}) if isinstance(diagnose, dict) else {}
         score_summary = diagnose.get("score_summary", {}) if isinstance(diagnose, dict) else {}
         comparison = diagnose.get("comparison_to_best_before_iteration", {}) if isinstance(diagnose, dict) else {}
+
+        execute_cv = execute.get("cv_result", {}) if isinstance(execute, dict) else {}
+        feature_names = _extract_feature_names(execute_cv.get("feature_registry", []))
+        feature_blocks = _extract_feature_blocks(execute_cv.get("feature_blocks", {}))
+        current_feature_set = set(feature_names)
+        new_features = [name for name in feature_names if name not in previous_feature_set]
 
         item["diagnose"] = {
             "status": diagnose.get("status"),
@@ -95,10 +122,51 @@ def _merge_iteration_rows(
             "comparison_to_best_before_iteration": comparison,
             "feedback_for_next_iteration": feedback,
         }
+        item["feature_info"] = {
+            "total_feature_count": len(feature_names),
+            "new_feature_count_vs_previous_iter": len(new_features),
+            "feature_blocks": feature_blocks,
+            "new_feature_preview": new_features[:feature_preview_limit],
+            "feature_preview": feature_names[:feature_preview_limit],
+            "feature_names_for_record": feature_names[:feature_store_limit],
+        }
         merged.append(item)
+        previous_feature_set = current_feature_set
 
-    merged.sort(key=lambda x: int(x.get("iteration", 0)))
     return merged
+
+
+def _extract_feature_names(feature_registry: Any) -> List[str]:
+    if not isinstance(feature_registry, list):
+        return []
+
+    names: List[str] = []
+    seen: Set[str] = set()
+    for item in feature_registry:
+        name = None
+        if isinstance(item, str):
+            name = item
+        elif isinstance(item, dict):
+            if "feature" in item:
+                name = item.get("feature")
+            elif "name" in item:
+                name = item.get("name")
+        if name is None:
+            continue
+        text = str(name).strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        names.append(text)
+    return names
+
+
+def _extract_feature_blocks(feature_blocks: Any) -> List[str]:
+    if isinstance(feature_blocks, dict):
+        return [str(key) for key in feature_blocks.keys()]
+    if isinstance(feature_blocks, list):
+        return [str(item) for item in feature_blocks]
+    return []
 
 
 def _render_html(payload: Dict[str, Any]) -> str:
@@ -113,6 +181,7 @@ def _render_html(payload: Dict[str, Any]) -> str:
     best_html = _render_best_summary(best_summary)
     rows_html = "".join(_render_iteration_row(row) for row in iterations)
     feedback_sections = "".join(_render_feedback_section(row) for row in iterations)
+    feature_sections = "".join(_render_feature_section(row) for row in iterations)
 
     return f"""<!doctype html>
 <html lang="en">
@@ -128,7 +197,7 @@ def _render_html(payload: Dict[str, Any]) -> str:
       color: #1f2937;
     }}
     .container {{
-      max-width: 1100px;
+      max-width: 1180px;
       margin: 0 auto;
       padding: 28px 20px 48px;
     }}
@@ -215,6 +284,12 @@ def _render_html(payload: Dict[str, Any]) -> str:
       padding: 0;
       font-size: 13px;
     }}
+    code {{
+      background: #f3f4f6;
+      border-radius: 4px;
+      padding: 1px 4px;
+      font-size: 12px;
+    }}
   </style>
 </head>
 <body>
@@ -242,16 +317,22 @@ def _render_html(payload: Dict[str, Any]) -> str:
             <th>Mean CV</th>
             <th>Std CV</th>
             <th>Objective</th>
+            <th>Total Features</th>
+            <th>New Features</th>
             <th>Exec Attempts</th>
             <th>Fallbacks</th>
             <th>Root Cause</th>
-            <th>Reason</th>
           </tr>
         </thead>
         <tbody>
           {rows_html}
         </tbody>
       </table>
+    </div>
+
+    <div class="section">
+      <h2>Generated Features By Iteration</h2>
+      {feature_sections}
     </div>
 
     <div class="section">
@@ -298,8 +379,8 @@ def _render_iteration_row(row: Dict[str, Any]) -> str:
     status_text = "SUCCESS" if status_ok else "FAILED"
 
     diagnose = row.get("diagnose", {}) if isinstance(row.get("diagnose"), dict) else {}
+    feature_info = row.get("feature_info", {}) if isinstance(row.get("feature_info"), dict) else {}
     root_cause = diagnose.get("root_cause_category") or "-"
-    reason = row.get("reason") or "-"
 
     return (
         "<tr>"
@@ -309,12 +390,37 @@ def _render_iteration_row(row: Dict[str, Any]) -> str:
         f"<td>{_fmt_float(row.get('mean_cv'))}</td>"
         f"<td>{_fmt_float(row.get('std_cv'))}</td>"
         f"<td>{_fmt_float(row.get('objective_mean'))}</td>"
+        f"<td>{html.escape(str(feature_info.get('total_feature_count', '-')))}</td>"
+        f"<td>{html.escape(str(feature_info.get('new_feature_count_vs_previous_iter', '-')))}</td>"
         f"<td>{html.escape(str(row.get('execute_attempts', '-')))}</td>"
         f"<td>{html.escape(str(row.get('implement_fallback_count', '-')))}</td>"
         f"<td>{html.escape(str(root_cause))}</td>"
-        f"<td>{html.escape(str(reason))}</td>"
         "</tr>"
     )
+
+
+def _render_feature_section(row: Dict[str, Any]) -> str:
+    feature_info = row.get("feature_info", {}) if isinstance(row.get("feature_info"), dict) else {}
+    blocks = feature_info.get("feature_blocks", [])
+    new_preview = feature_info.get("new_feature_preview", [])
+    all_preview = feature_info.get("feature_preview", [])
+
+    blocks_html = "".join(f"<span class=\"pill\">{html.escape(str(b))}</span>" for b in blocks) if blocks else "<span class=\"pill\">-</span>"
+    new_html = _render_inline_feature_list(new_preview)
+    all_html = _render_inline_feature_list(all_preview)
+
+    return f"""
+<div class="feedback-box">
+  <div><strong>Iteration {html.escape(str(row.get("iteration", "-")))}</strong></div>
+  <div class="muted">
+    total={html.escape(str(feature_info.get("total_feature_count", 0)))} /
+    new_vs_prev={html.escape(str(feature_info.get("new_feature_count_vs_previous_iter", 0)))}
+  </div>
+  <div><strong>Feature Blocks</strong><br/>{blocks_html}</div>
+  <div><strong>New Feature Preview</strong>{new_html}</div>
+  <div><strong>Feature Preview</strong>{all_html}</div>
+</div>
+"""
 
 
 def _render_feedback_section(row: Dict[str, Any]) -> str:
@@ -343,6 +449,13 @@ def _render_list(values: Any) -> str:
     if not isinstance(values, list) or not values:
         return "<ul><li>-</li></ul>"
     items = "".join(f"<li>{html.escape(str(v))}</li>" for v in values)
+    return f"<ul>{items}</ul>"
+
+
+def _render_inline_feature_list(values: Sequence[Any]) -> str:
+    if not values:
+        return "<ul><li>-</li></ul>"
+    items = "".join(f"<li><code>{html.escape(str(v))}</code></li>" for v in values)
     return f"<ul>{items}</ul>"
 
 

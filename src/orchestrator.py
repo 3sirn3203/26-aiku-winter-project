@@ -49,6 +49,7 @@ def run_pipeline(config: Dict) -> Dict:
 
     iter_num = budget_cfg.get("iterations", 3)
     diagnose_results: List[Dict] = []
+    execute_results: List[Dict] = []
     prev_diagnose_result = None
     iteration_summaries: List[Dict] = []
     successful_iterations: List[Dict] = []
@@ -134,8 +135,10 @@ def run_pipeline(config: Dict) -> Dict:
 
         # 5. Diagnose
         print("  Step 5: Diagnose")
+        execute_results.append({"iteration": iteration, **execute_result})
         best_before_iteration = max(successful_iterations, key=lambda x: x["objective_mean"]) if successful_iterations else None
         diagnose_result = diagnose(
+            client=client,
             diagnose_cfg=diagnose_cfg,
             execute_result=execute_result,
             output_dir=iter_dir,
@@ -182,6 +185,7 @@ def run_pipeline(config: Dict) -> Dict:
         report_cfg=report_cfg,
         diagnose_results=diagnose_results,
         iteration_summaries=iteration_summaries,
+        execute_results=execute_results,
         run_dir=run_dir,
         best_summary=best,
     )
