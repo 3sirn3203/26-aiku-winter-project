@@ -99,6 +99,23 @@ def profiling(
         execution_timeout_sec=execution_timeout_sec,
         system_instruction=code_system_instruction,
     )
+    basic_profile_prompt_context = _build_basic_profile_prompt_context(
+        basic_profile_json=basic_stage["profile_json"],
+        profile_cfg=profile_cfg,
+    )
+    _write_json(
+        os.path.join(profile_dir, "profile_basic_prompt_context.json"),
+        basic_profile_prompt_context,
+    )
+    correlation_prompt_dataset_context = _build_correlation_prompt_dataset_context(
+        dataset_context=dataset_context,
+        basic_profile_prompt_context=basic_profile_prompt_context,
+        profile_cfg=profile_cfg,
+    )
+    _write_json(
+        os.path.join(profile_dir, "profile_correlation_prompt_context.json"),
+        correlation_prompt_dataset_context,
+    )
 
     correlation_stage = _run_profile_codegen_stage(
         client=client,
@@ -107,8 +124,8 @@ def profiling(
         profile_dir=profile_dir,
         train_path=train_path,
         prompt_payload={
-            "dataset_context": json.dumps(dataset_context, ensure_ascii=False),
-            "basic_profile_json": json.dumps(basic_stage["profile_json"], ensure_ascii=False),
+            "dataset_context": json.dumps(correlation_prompt_dataset_context, ensure_ascii=False),
+            "basic_profile_json": json.dumps(basic_profile_prompt_context, ensure_ascii=False),
             "previous_diagnose_json": (
                 json.dumps(diagnose_prompt_context, ensure_ascii=False)
                 if diagnose_prompt_context is not None
@@ -207,6 +224,8 @@ def profiling(
                     "last_error": insight_stage["last_error"],
                 },
                 "diagnose_prompt_context": diagnose_prompt_context,
+                "basic_profile_prompt_context": basic_profile_prompt_context,
+                "correlation_prompt_dataset_context": correlation_prompt_dataset_context,
             },
             file,
             ensure_ascii=False,
@@ -452,6 +471,256 @@ def _build_dataset_context(train_df: pd.DataFrame) -> Dict[str, Any]:
         "missing_top": missing_top,
         "cardinality_top": cardinality_top,
         "sample_rows": sample_rows,
+    }
+
+
+def _build_basic_profile_prompt_context(
+    basic_profile_json: Dict[str, Any],
+    profile_cfg: Dict[str, Any],
+) -> Dict[str, Any]:
+    if not isinstance(basic_profile_json, dict):
+        return {}
+
+    missing_top_k = int(profile_cfg.get("basic_to_corr_missing_top_k", 10))
+    cardinality_top_k = int(profile_cfg.get("basic_to_corr_cardinality_top_k", 10))
+    leakage_top_k = int(profile_cfg.get("basic_to_corr_leakage_top_k", 6))
+    notes_top_k = int(profile_cfg.get("basic_to_corr_notes_top_k", 3))
+    max_text_chars = int(profile_cfg.get("basic_to_corr_text_max_chars", 140))
+
+    def _truncate_text(value: Any) -> str:
+        text = str(value or "").strip()
+        if len(text) > max_text_chars:
+            return text[: max_text_chars - 3] + "..."
+        return text
+
+    def _safe_float(value: Any) -> Optional[float]:
+        try:
+            return float(value)
+        except Exception:
+            return None
+
+    def _safe_int(value: Any) -> Optional[int]:
+        try:
+            return int(value)
+        except Exception:
+            return None
+
+    def _top_items_from_dict(dct: Any, top_k: int, descending: bool = True) -> List[Dict[str, Any]]:
+        if not isinstance(dct, dict):
+            return []
+        parsed: List[Dict[str, Any]] = []
+        for key, value in dct.items():
+            numeric = _safe_float(value)
+            if numeric is None:
+                continue
+            parsed.append({"column": _truncate_text(key), "value": numeric})
+        parsed.sort(key=lambda x: x["value"], reverse=descending)
+        return parsed[:top_k]
+
+    def _compact_summary(summary: Any) -> Dict[str, Any]:
+        if isinstance(summary, dict):
+            out: Dict[str, Any] = {}
+            for key in ["description", "numeric_cols", "object_cols", "boolean_cols", "total_cols"]:
+                if key in summary:
+                    value = summary[key]
+                    out[key] = _truncate_text(value) if isinstance(value, str) else value
+            if not out:
+                for key, value in list(summary.items())[:5]:
+                    out[str(key)] = _truncate_text(value) if isinstance(value, str) else value
+            return out
+        if isinstance(summary, str):
+            return {"description": _truncate_text(summary)}
+        return {}
+
+    def _compact_target(target: Any) -> Dict[str, Any]:
+        if not isinstance(target, dict):
+            return {}
+        out: Dict[str, Any] = {}
+        for key in ["column", "dtype", "nunique", "type"]:
+            if key in target:
+                value = target[key]
+                out[key] = _truncate_text(value) if isinstance(value, str) else value
+        value_counts = target.get("value_counts")
+        if isinstance(value_counts, dict):
+            compact_counts = []
+            for key, value in list(value_counts.items())[:5]:
+                compact_counts.append({"value": _truncate_text(key), "count": _safe_int(value)})
+            out["value_counts_top"] = compact_counts
+        return out
+
+    def _compact_leakage(leakage: Any) -> List[Dict[str, str]]:
+        if not isinstance(leakage, list):
+            return []
+        out: List[Dict[str, str]] = []
+        for item in leakage[:leakage_top_k]:
+            if isinstance(item, dict):
+                out.append(
+                    {
+                        "column": _truncate_text(item.get("column", "")),
+                        "reason": _truncate_text(item.get("reason", "")),
+                    }
+                )
+            else:
+                out.append({"column": "", "reason": _truncate_text(item)})
+        return out
+
+    def _compact_notes(notes: Any) -> List[str]:
+        if not isinstance(notes, list):
+            return []
+        return [_truncate_text(note) for note in notes[:notes_top_k]]
+
+    dtypes = basic_profile_json.get("dtypes")
+    dtype_counts: Dict[str, int] = {}
+    if isinstance(dtypes, dict):
+        raw_types = [str(v).lower() for v in dtypes.values()]
+        dtype_counts = {
+            "numeric": sum(1 for t in raw_types if ("int" in t or "float" in t or "double" in t)),
+            "object": sum(1 for t in raw_types if ("object" in t or "string" in t)),
+            "bool": sum(1 for t in raw_types if "bool" in t),
+            "other": sum(1 for t in raw_types if not any(x in t for x in ["int", "float", "double", "object", "string", "bool"])),
+        }
+
+    shape = basic_profile_json.get("shape", {})
+    compact_shape = {
+        "rows": _safe_int(shape.get("rows")) if isinstance(shape, dict) else None,
+        "cols": _safe_int(shape.get("cols")) if isinstance(shape, dict) else None,
+    }
+
+    missingness_top = _top_items_from_dict(
+        dct=basic_profile_json.get("missingness"),
+        top_k=missing_top_k,
+        descending=True,
+    )
+    missingness_top = [item for item in missingness_top if item["value"] > 0]
+
+    cardinality_top = _top_items_from_dict(
+        dct=basic_profile_json.get("cardinality"),
+        top_k=cardinality_top_k,
+        descending=True,
+    )
+
+    return {
+        "summary": _compact_summary(basic_profile_json.get("summary")),
+        "shape": compact_shape,
+        "dtype_counts": dtype_counts,
+        "missingness_top": [
+            {"column": item["column"], "missing_pct": round(float(item["value"]), 4)}
+            for item in missingness_top
+        ],
+        "cardinality_top": [
+            {"column": item["column"], "nunique": _safe_int(item["value"])}
+            for item in cardinality_top
+        ],
+        "target_candidates": _compact_target(basic_profile_json.get("target_candidates")),
+        "potential_leakage_signals": _compact_leakage(
+            basic_profile_json.get("potential_leakage_signals")
+        ),
+        "notes": _compact_notes(basic_profile_json.get("notes")),
+    }
+
+
+def _build_correlation_prompt_dataset_context(
+    dataset_context: Dict[str, Any],
+    basic_profile_prompt_context: Dict[str, Any],
+    profile_cfg: Dict[str, Any],
+) -> Dict[str, Any]:
+    if not isinstance(dataset_context, dict):
+        return {}
+
+    column_preview_k = int(profile_cfg.get("corr_context_column_preview_k", 20))
+    missing_top_k = int(profile_cfg.get("corr_context_missing_top_k", 10))
+    cardinality_top_k = int(profile_cfg.get("corr_context_cardinality_top_k", 10))
+    max_text_chars = int(profile_cfg.get("corr_context_text_max_chars", 100))
+
+    def _truncate_text(value: Any) -> str:
+        text = str(value or "").strip()
+        if len(text) > max_text_chars:
+            return text[: max_text_chars - 3] + "..."
+        return text
+
+    def _to_float(value: Any) -> Optional[float]:
+        try:
+            return float(value)
+        except Exception:
+            return None
+
+    dtypes = dataset_context.get("dtypes", {})
+    dtype_counts = {"numeric": 0, "object": 0, "bool": 0, "other": 0}
+    numeric_preview: List[str] = []
+    categorical_preview: List[str] = []
+    if isinstance(dtypes, dict):
+        for col, dtype in dtypes.items():
+            dtype_l = str(dtype).lower()
+            col_name = _truncate_text(col)
+            if "bool" in dtype_l:
+                dtype_counts["bool"] += 1
+            elif "int" in dtype_l or "float" in dtype_l or "double" in dtype_l:
+                dtype_counts["numeric"] += 1
+                if len(numeric_preview) < column_preview_k:
+                    numeric_preview.append(col_name)
+            elif "object" in dtype_l or "string" in dtype_l:
+                dtype_counts["object"] += 1
+                if len(categorical_preview) < column_preview_k:
+                    categorical_preview.append(col_name)
+            else:
+                dtype_counts["other"] += 1
+
+    columns = dataset_context.get("columns", [])
+    column_preview: List[str] = []
+    if isinstance(columns, list):
+        for col in columns[:column_preview_k]:
+            column_preview.append(_truncate_text(col))
+
+    missing_top = []
+    raw_missing_top = dataset_context.get("missing_top", [])
+    if isinstance(raw_missing_top, list):
+        for item in raw_missing_top[:missing_top_k]:
+            if not isinstance(item, dict):
+                continue
+            pct = _to_float(item.get("missing_pct"))
+            if pct is None or pct <= 0:
+                continue
+            missing_top.append(
+                {
+                    "column": _truncate_text(item.get("column", "")),
+                    "missing_pct": round(float(pct), 4),
+                }
+            )
+
+    cardinality_top = []
+    raw_cardinality_top = dataset_context.get("cardinality_top", [])
+    if isinstance(raw_cardinality_top, list):
+        for item in raw_cardinality_top[:cardinality_top_k]:
+            if not isinstance(item, dict):
+                continue
+            cardinality_top.append(
+                {
+                    "column": _truncate_text(item.get("column", "")),
+                    "nunique": item.get("nunique"),
+                }
+            )
+
+    shape = dataset_context.get("shape", {})
+    target_hint = basic_profile_prompt_context.get("target_candidates", {})
+
+    return {
+        "shape": {
+            "rows": shape.get("rows") if isinstance(shape, dict) else None,
+            "cols": shape.get("cols") if isinstance(shape, dict) else None,
+        },
+        "dtype_counts": dtype_counts,
+        "column_preview": column_preview,
+        "numeric_column_preview": numeric_preview,
+        "categorical_column_preview": categorical_preview,
+        "missing_top": missing_top,
+        "cardinality_top": cardinality_top,
+        "target_hint": {
+            "column": target_hint.get("column"),
+            "dtype": target_hint.get("dtype"),
+            "type": target_hint.get("type"),
+        }
+        if isinstance(target_hint, dict)
+        else {},
     }
 
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import re
 from pathlib import Path
 from types import ModuleType
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -19,6 +20,8 @@ from sklearn.metrics import (
 )
 from sklearn.model_selection import KFold, StratifiedKFold
 from sklearn.preprocessing import LabelEncoder
+
+SAFE_FEATURE_NAME_PATTERN = re.compile(r"^[A-Za-z0-9_]+$")
 
 
 class _DefaultPreprocessor:
@@ -132,6 +135,11 @@ def run_cross_validation(
         prep_state = preprocessor_module.fit_preprocessor(train_fold.copy(), label_col, runtime_config)
         train_pre = preprocessor_module.transform_preprocessor(train_fold.copy(), prep_state, runtime_config)
         valid_pre = preprocessor_module.transform_preprocessor(valid_fold.copy(), prep_state, runtime_config)
+        train_pre, valid_pre = _normalize_preprocessed_pair(
+            train_pre=train_pre,
+            other_pre=valid_pre,
+            label_col=label_col,
+        )
         _assert_label_exists(train_pre, label_col, "train_preprocessed")
         _assert_label_exists(valid_pre, label_col, "valid_preprocessed")
 
@@ -246,6 +254,11 @@ def fit_full_and_predict(
     prep_state = preprocessor_module.fit_preprocessor(train_df.copy(), label_col, runtime_config)
     train_pre = preprocessor_module.transform_preprocessor(train_df.copy(), prep_state, runtime_config)
     test_pre = preprocessor_module.transform_preprocessor(test_df.copy(), prep_state, runtime_config)
+    train_pre, test_pre = _normalize_preprocessed_pair(
+        train_pre=train_pre,
+        other_pre=test_pre,
+        label_col=label_col,
+    )
     _assert_label_exists(train_pre, label_col, "train_preprocessed")
 
     fe_state = feature_module.fit_feature_engineering(
@@ -521,11 +534,7 @@ def _score_regression(metric: str, y_true: pd.Series, y_pred: np.ndarray) -> flo
 
 
 def _align_and_encode_pair(train_df: pd.DataFrame, other_df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    train = _ensure_dataframe(train_df)
-    other = _ensure_dataframe(other_df)
-    train.columns = [str(col) for col in train.columns]
-    other.columns = [str(col) for col in other.columns]
-    other = other.reindex(columns=train.columns)
+    train, other = _normalize_feature_pair(train_df=train_df, other_df=other_df)
 
     train_out = pd.DataFrame(index=train.index)
     other_out = pd.DataFrame(index=other.index)
@@ -548,6 +557,76 @@ def _ensure_dataframe(df: Any) -> pd.DataFrame:
     if isinstance(df, pd.DataFrame):
         return df.copy()
     return pd.DataFrame(df)
+
+
+def _normalize_feature_pair(train_df: pd.DataFrame, other_df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    train = _ensure_dataframe(train_df)
+    other = _ensure_dataframe(other_df)
+
+    train_raw_cols = [str(col) for col in train.columns]
+    other_raw_cols = [str(col) for col in other.columns]
+    train.columns = train_raw_cols
+    other.columns = other_raw_cols
+
+    # Align using raw train schema first, then enforce safe/unique names consistently.
+    other = other.reindex(columns=train_raw_cols)
+    normalized_cols = _build_safe_unique_feature_names(train_raw_cols)
+    train.columns = normalized_cols
+    other.columns = normalized_cols
+    return train, other
+
+
+def _normalize_preprocessed_pair(
+    train_pre: pd.DataFrame,
+    other_pre: pd.DataFrame,
+    label_col: str,
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    train_df = _ensure_dataframe(train_pre)
+    other_df = _ensure_dataframe(other_pre)
+
+    train_label = train_df[label_col].copy() if label_col in train_df.columns else None
+    other_label = other_df[label_col].copy() if label_col in other_df.columns else None
+
+    train_feat = train_df.drop(columns=[label_col], errors="ignore")
+    other_feat = other_df.drop(columns=[label_col], errors="ignore")
+    train_feat, other_feat = _normalize_feature_pair(train_df=train_feat, other_df=other_feat)
+
+    train_out = train_feat.copy()
+    other_out = other_feat.copy()
+    if train_label is not None:
+        train_out[label_col] = train_label.values
+    if other_label is not None:
+        other_out[label_col] = other_label.values
+    return train_out, other_out
+
+
+def _build_safe_unique_feature_names(names: Iterable[Any]) -> List[str]:
+    used: set[str] = set()
+    out: List[str] = []
+    for idx, raw_name in enumerate(names):
+        base = _sanitize_feature_name(raw_name)
+        if not base:
+            base = f"feature_{idx}"
+        candidate = base
+        suffix = 1
+        while candidate in used:
+            candidate = f"{base}_{suffix}"
+            suffix += 1
+        used.add(candidate)
+        out.append(candidate)
+    return out
+
+
+def _sanitize_feature_name(name: Any) -> str:
+    text = str(name)
+    text = re.sub(r"[^A-Za-z0-9_]", "_", text)
+    text = re.sub(r"_+", "_", text)
+    text = text.strip("_")
+    if not text:
+        return ""
+    if not SAFE_FEATURE_NAME_PATTERN.fullmatch(text):
+        return ""
+    return text
 
 
 def _feature_registry_from_state(feature_module: Any, fe_state: Dict[str, Any]) -> List[Dict[str, Any]]:

@@ -24,6 +24,13 @@ Rules:
 - Ensure transformed matrix and column names always match in length.
 - Store learned output column schema in `prep_state` and enforce it at transform time.
 - Fill missing transformed columns with 0 and drop unexpected extra columns.
+- Feature column names must be LightGBM-safe: only `[A-Za-z0-9_]`.
+- Feature column names must be unique after all transformations.
+- Do NOT rely on simple suffix once (e.g., `_1`) only. Use deterministic de-dup with re-check loop:
+  while candidate_name already exists -> append/increase suffix.
+- Never return duplicated columns.
+- Never return empty column names.
+- Before returning DataFrame, sanitize+dedupe output column names and enforce exact schema stored in `prep_state`.
 
 Output:
 - Return only executable Python code.

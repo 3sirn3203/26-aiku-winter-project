@@ -23,6 +23,13 @@ Rules:
 - Output must preserve row count exactly.
 - Store feature schema in `fe_state` and enforce exact column order at transform time.
 - Fill missing feature columns with 0 and drop unexpected extra feature columns.
+- Feature column names must be LightGBM-safe: only `[A-Za-z0-9_]`.
+- Feature column names must be unique after all transformations.
+- Do NOT rely on one-shot rename. Use deterministic de-dup with re-check loop:
+  while candidate_name already exists -> append/increase suffix.
+- Never return duplicated columns.
+- Never return empty column names.
+- Before returning DataFrame, sanitize+dedupe output column names and enforce exact schema from `fe_state`.
 
 Output:
 - Return only executable Python code.

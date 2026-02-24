@@ -15,6 +15,8 @@ import pandas as pd
 from google import genai
 from jinja2 import Template
 
+SAFE_FEATURE_NAME_PATTERN = re.compile(r"^[A-Za-z0-9_]+$")
+
 PREP_SYSTEM_INSTRUCTION = """You generate only executable Python code for a tabular preprocessor module.
 Return code only.
 Do not return markdown fences.
@@ -336,6 +338,11 @@ def _contract_smoke_check(
     prep_state = preprocessor_module.fit_preprocessor(probe_df.copy(), resolved_label, runtime_config)
     train_pre = preprocessor_module.transform_preprocessor(probe_df.copy(), prep_state, runtime_config)
     test_pre = preprocessor_module.transform_preprocessor(probe_without_label.copy(), prep_state, runtime_config)
+    train_pre, test_pre, pre_norm_stats = _normalize_preprocessed_pair_for_contract(
+        train_pre=train_pre,
+        test_pre=test_pre,
+        label_col=resolved_label,
+    )
 
     if not isinstance(train_pre, pd.DataFrame):
         raise ValueError("transform_preprocessor(train_with_label) must return pandas.DataFrame.")
@@ -360,6 +367,7 @@ def _contract_smoke_check(
     if resolved_label in x_train.columns or resolved_label in x_test.columns:
         raise ValueError("transform_feature_engineering output must not contain label_col.")
 
+    x_train, x_test, normalization_stats = _normalize_feature_pair_for_contract(x_train=x_train, x_test=x_test)
     _assert_valid_feature_frame(x_train, "x_train")
     _assert_valid_feature_frame(x_test, "x_test")
 
@@ -369,6 +377,8 @@ def _contract_smoke_check(
     return {
         "rows_checked": int(len(probe_df)),
         "num_features": int(x_train.shape[1]),
+        "preprocessor_normalization_stats": pre_norm_stats,
+        "normalization_stats": normalization_stats,
     }
 
 
@@ -377,9 +387,22 @@ def _assert_valid_feature_frame(df: pd.DataFrame, name: str) -> None:
         raise ValueError(f"{name} is empty.")
     col_names = [str(c) for c in df.columns]
     if len(col_names) != len(set(col_names)):
-        raise ValueError(f"{name} contains duplicated columns.")
+        dup_counts: Dict[str, int] = {}
+        for col in col_names:
+            dup_counts[col] = dup_counts.get(col, 0) + 1
+        duplicates = [col for col, count in dup_counts.items() if count > 1]
+        sample = duplicates[:10]
+        raise ValueError(
+            f"{name} contains duplicated columns. duplicate_count={len(duplicates)}, sample={sample}"
+        )
     if any(col.strip() == "" for col in col_names):
         raise ValueError(f"{name} contains empty column names.")
+    unsafe = [col for col in col_names if SAFE_FEATURE_NAME_PATTERN.fullmatch(col) is None]
+    if unsafe:
+        sample = unsafe[:10]
+        raise ValueError(
+            f"{name} contains feature names with unsupported characters. unsafe_count={len(unsafe)}, sample={sample}"
+        )
 
 
 def _resolve_label_col(label_col: Optional[str], train_df: pd.DataFrame, pipeline_config: Dict[str, Any]) -> str:
@@ -415,6 +438,94 @@ def _extract_python_code(raw_text: str) -> str:
     match = fence_pattern.search(text)
     if match:
         return match.group(1).strip()
+    return text
+
+
+def _normalize_feature_pair_for_contract(
+    x_train: pd.DataFrame,
+    x_test: pd.DataFrame,
+) -> tuple[pd.DataFrame, pd.DataFrame, Dict[str, Any]]:
+    train = x_train.copy()
+    test = x_test.copy()
+    train_raw_cols = [str(col) for col in train.columns]
+    test.columns = [str(col) for col in test.columns]
+    test = test.reindex(columns=train_raw_cols)
+
+    normalized_cols = _build_safe_unique_feature_names(train_raw_cols)
+    train.columns = normalized_cols
+    test.columns = normalized_cols
+
+    duplicate_count_before = len(train_raw_cols) - len(set(train_raw_cols))
+    renamed_count = sum(1 for raw, new in zip(train_raw_cols, normalized_cols) if str(raw) != str(new))
+    return (
+        train,
+        test,
+        {
+            "duplicate_count_before": int(duplicate_count_before),
+            "renamed_count": int(renamed_count),
+        },
+    )
+
+
+def _normalize_preprocessed_pair_for_contract(
+    train_pre: pd.DataFrame,
+    test_pre: pd.DataFrame,
+    label_col: str,
+) -> tuple[pd.DataFrame, pd.DataFrame, Dict[str, Any]]:
+    train_df = train_pre.copy()
+    test_df = test_pre.copy()
+    train_label = train_df[label_col].copy() if label_col in train_df.columns else None
+    test_label = test_df[label_col].copy() if label_col in test_df.columns else None
+
+    train_feat = train_df.drop(columns=[label_col], errors="ignore")
+    test_feat = test_df.drop(columns=[label_col], errors="ignore")
+    train_feat_norm, test_feat_norm, feat_stats = _normalize_feature_pair_for_contract(
+        x_train=train_feat,
+        x_test=test_feat,
+    )
+
+    train_out = train_feat_norm.copy()
+    test_out = test_feat_norm.copy()
+    if train_label is not None:
+        train_out[label_col] = train_label.values
+    if test_label is not None:
+        test_out[label_col] = test_label.values
+    return (
+        train_out,
+        test_out,
+        {
+            "feature_normalization": feat_stats,
+            "label_preserved_train": bool(train_label is not None),
+            "label_preserved_test": bool(test_label is not None),
+        },
+    )
+
+
+def _build_safe_unique_feature_names(names: List[str]) -> List[str]:
+    used: set[str] = set()
+    out: List[str] = []
+    for idx, raw_name in enumerate(names):
+        base = _sanitize_feature_name(raw_name)
+        if not base:
+            base = f"feature_{idx}"
+        candidate = base
+        suffix = 1
+        while candidate in used:
+            candidate = f"{base}_{suffix}"
+            suffix += 1
+        used.add(candidate)
+        out.append(candidate)
+    return out
+
+
+def _sanitize_feature_name(name: str) -> str:
+    text = re.sub(r"[^A-Za-z0-9_]", "_", str(name))
+    text = re.sub(r"_+", "_", text)
+    text = text.strip("_")
+    if not text:
+        return ""
+    if SAFE_FEATURE_NAME_PATTERN.fullmatch(text) is None:
+        return ""
     return text
 
 
