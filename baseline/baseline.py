@@ -1,6 +1,8 @@
 import inspect
 import json
 import os
+import shutil
+from datetime import datetime
 from argparse import ArgumentParser
 
 import pandas as pd
@@ -93,6 +95,42 @@ def build_fit_kwargs(config):
     return filtered_kwargs
 
 
+def resolve_output_paths(config, config_path):
+    data_cfg = config.get("data", {})
+    output_cfg = config.get("output", {})
+    output_root = data_cfg.get("output_path", "baseline/generated")
+
+    dataset_dir = output_cfg.get("dataset_dir")
+    if not dataset_dir:
+        dataset_dir = os.path.splitext(os.path.basename(config_path))[0]
+
+    dataset_dir = str(dataset_dir).strip()
+    if not dataset_dir:
+        dataset_dir = "default"
+
+    hidden_dataset_dir = bool(output_cfg.get("hidden_dataset_dir", True))
+    if hidden_dataset_dir and not dataset_dir.startswith("."):
+        dataset_dir = f".{dataset_dir}"
+
+    os.makedirs(output_root, exist_ok=True)
+    output_dir = os.path.join(output_root, dataset_dir)
+    os.makedirs(output_dir, exist_ok=True)
+
+    submission_prefix = str(output_cfg.get("submission_prefix", "submission")).strip() or "submission"
+    timestamp_format = str(output_cfg.get("timestamp_format", "%Y%m%d_%H%M%S")).strip() or "%Y%m%d_%H%M%S"
+    base_tag = datetime.now().strftime(timestamp_format)
+    run_tag = base_tag
+    suffix = 1
+
+    while os.path.exists(os.path.join(output_dir, f"{submission_prefix}_{run_tag}.csv")):
+        run_tag = f"{base_tag}_{suffix}"
+        suffix += 1
+
+    submission_path = os.path.join(output_dir, f"{submission_prefix}_{run_tag}.csv")
+    model_path = os.path.join(output_dir, f"model_{run_tag}")
+    return output_dir, model_path, submission_path
+
+
 def main():
     parser = ArgumentParser()
     parser.add_argument("--config", type=str, default="baseline/config/dacon.json")
@@ -109,17 +147,21 @@ def main():
         "sample_submission_path",
         data_cfg.get("submission_path", "data/dacon/sample_submission.csv"),
     )
-    output_path = data_cfg.get("output_path", "baseline/generated/dacon_ver1")
+    output_cfg = config.get("output", {})
+    save_model = True
+    if isinstance(output_cfg, dict):
+        save_model = bool(output_cfg.get("save_model", True))
+    elif "save_model" in config:
+        save_model = bool(config.get("save_model"))
     id_col = data_cfg.get("id_col", "ID")
     validation_cfg = config.get("validation", {})
     holdout_frac = validation_cfg.get("holdout_frac", 0.2)
     random_state = validation_cfg.get("random_state", 42)
 
-    if os.path.exists(output_path):
-        raise FileExistsError(f"Output directory already exists: {output_path}")
-    os.makedirs(output_path, exist_ok=False)
-    model_path = os.path.join(output_path, "model")
-    submission_path = os.path.join(output_path, "submission.csv")
+    output_dir, model_path, submission_path = resolve_output_paths(
+        config=config,
+        config_path=args.config,
+    )
 
     train_df = load_csv(train_path)
     test_df = load_csv(test_path)
@@ -160,7 +202,16 @@ def main():
     submission_df[label_col] = predictions.values
 
     submission_df.to_csv(submission_path, index=False, encoding="utf-8-sig")
-    print(f"[INFO] Model saved to: {model_path}")
+    if save_model:
+        print(f"[INFO] Model saved to: {model_path}")
+    else:
+        if os.path.exists(model_path):
+            try:
+                shutil.rmtree(model_path)
+            except Exception as exc:  # noqa: BLE001
+                print(f"[WARN] Failed to remove model directory: {exc}")
+        print("[INFO] Model artifacts removed (output.save_model=false)")
+    print(f"[INFO] Output directory: {output_dir}")
     print(f"[INFO] Submission saved to: {submission_path}")
 
 

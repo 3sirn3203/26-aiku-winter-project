@@ -3,9 +3,15 @@
     "train_path": "data/dacon/train.csv",
     "test_path": "data/dacon/test.csv",
     "sample_submission_path": "data/dacon/sample_submission.csv",
-    "output_path": "baseline/generated/dacon_ver1",
+    "output_path": "baseline/generated",
     "id_col": "ID",
     "label_col": "completed"
+  },
+  "output": {
+    "save_model": false,
+    "dataset_dir": "dacon",
+    "hidden_dataset_dir": false,
+    "submission_prefix": "submission"
   },
   "model": {
     "eval_metric": "f1",

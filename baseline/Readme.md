@@ -20,8 +20,7 @@ python baseline/baseline.py --config baseline/config/dacon.json
 ```
 
 결과 파일:
-- `baseline/generated/dacon_ver1/model/`
-- `baseline/generated/dacon_ver1/submission.csv`
+- `baseline/generated/.dacon/submission_YYYYMMDD_HHMMSS.csv`
 
 ### Kaggle
 
@@ -30,8 +29,7 @@ python baseline/baseline.py --config baseline/config/kaggle.json
 ```
 
 결과 파일:
-- `baseline/generated/kaggle_ver1/model/`
-- `baseline/generated/kaggle_ver1/submission.csv`
+- `baseline/generated/.kaggle/submission_YYYYMMDD_HHMMSS.csv`
 
 ## 3. Config 구조
 
@@ -43,9 +41,15 @@ python baseline/baseline.py --config baseline/config/kaggle.json
     "train_path": "data/dacon/train.csv",
     "test_path": "data/dacon/test.csv",
     "sample_submission_path": "data/dacon/sample_submission.csv",
-    "output_path": "baseline/generated/dacon_ver1",
+    "output_path": "baseline/generated",
     "id_col": "ID",
     "label_col": "completed"
+  },
+  "output": {
+    "save_model": false,
+    "dataset_dir": "dacon",
+    "hidden_dataset_dir": true,
+    "submission_prefix": "submission"
   },
   "model": {
     "eval_metric": "f1",
@@ -81,5 +85,8 @@ python baseline/baseline.py --config baseline/config/kaggle.json
   - 예: `hyperparameters`, `included_model_types`, `excluded_model_types` 등
   - `TabularPredictor.fit()`에서 지원하지 않는 키는 경고 후 무시됩니다.
 - GPU 사용 시 `model.num_gpus`를 `1` 이상으로 설정합니다.
+- `output.save_model=false`이면 학습 후 모델 디렉토리를 삭제하고 submission 파일만 남깁니다.
 - `output_path`는 파일이 아니라 실행 결과 디렉토리입니다.
-  - 이미 같은 경로가 존재하면 에러를 발생시킵니다.
+  - `output.dataset_dir`(예: `dacon`, `kaggle`) 하위 디렉토리를 자동으로 생성합니다.
+  - `output.hidden_dataset_dir=true`이면 `.dacon`, `.kaggle`처럼 숨김 디렉토리로 저장됩니다.
+  - 파일명은 `submission_타임스탬프.csv` 형식으로 누적 저장됩니다.
