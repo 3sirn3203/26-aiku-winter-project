@@ -1,152 +1,96 @@
 # 26-Winter Project: LLM 기반 Tabular Feature Engineering
 
-![프로젝트 워크플로우](assets/figure.png)
+## 소개
+이 프로젝트는 LLM이 tabular 데이터의 전처리/피처 엔지니어링 코드를 반복적으로 개선하고, CV 결과를 기반으로 다음 시도를 자동으로 조정하는 실험 파이프라인입니다.
 
-## 프로젝트 개요
+핵심 특징:
+- Iteration 기반 자동 개선 루프 (Profile -> Hypothesis -> Implement -> Execute -> Diagnose)
+- 3단계에서 E2E 스켈레톤 코드의 TODO를 LLM이 완성
+- 4단계에서 생성된 `implement_pipeline.py`를 직접 실행해 성능 검증
+- 실행 산출물(`runs/<run_id>/...`) 자동 저장 및 HTML/JSON 리포트 생성
 
-이 프로젝트는 **LLM Agent를 이용해 tabular 데이터 전처리/피처 엔지니어링 코드를 반복 개선**하고,  
-검증 결과를 바탕으로 다음 iteration 전략을 자동으로 갱신하는 파이프라인입니다.
+## 방법론
+파이프라인은 iteration마다 아래 단계를 수행합니다.
 
-- 실행 엔트리포인트: `main.py`
-- 오케스트레이션: `src/orchestrator.py`
-- 실행 결과: `runs/<run_id>/...`
+1. `Step 1: Profiling`  
+   - 데이터 기초 통계/상관 특성/리스크를 분석해 프로파일 컨텍스트를 생성합니다.
 
----
+2. `Step 2: Hypothesis`  
+   - 프로파일 결과(선택적으로 웹 리서치 포함)를 바탕으로 전처리/피처 가설을 생성합니다.
 
-## 프로젝트 디렉토리 구조
+3. `Step 3: Implement`  
+   - 고정된 E2E 스켈레톤(`src/prompt/3_implement_e2e_skeleton.py`)을 프롬프트에 포함해,
+     TODO 구간만 가설에 맞게 채운 전체 실행 스크립트(`implement_pipeline.py`)를 생성합니다.
+   - 문법 체크 실패 시 재시도합니다.
 
-```text
-.
-├── assets/
-│   └── figure.png
-├── config/
-│   └── dacon.json
-├── data/
-│   ├── dacon/
-│   └── kaggle/
-├── runs/
-│   └── <run_id>/
-│       ├── config.json
-│       ├── report.html
-│       ├── report.json
-│       └── iteration_<n>/
-│           ├── profile/
-│           ├── hypothesis/
-│           ├── implement/
-│           ├── execute/
-│           └── diagnose/
-├── src/
-│   ├── orchestrator.py
-│   ├── val_wrapper.py
-│   ├── prompt/
-│   │   ├── 1_profile.j2
-│   │   ├── 2_hypothesis.j2
-│   │   ├── 3_implement_prep.j2
-│   │   ├── 3_implement_fe.j2
-│   │   ├── 5_diagnose.j2
-│   │   └── 6_report.j2
-│   └── modules/
-│       ├── profile.py
-│       ├── hypothesis.py
-│       ├── implement.py
-│       ├── execute.py
-│       ├── diagnose.py
-│       ├── report.py
-│       └── validator.py
-├── baseline/
-│   ├── baseline.py
-│   └── config/
-└── submission.py
+4. `Step 4: Execute`  
+   - 생성된 `implement_pipeline.py`를 실행해 교차검증을 수행합니다.
+   - `mean_cv`, `std_cv`, `metric`, `objective_mean`를 포함한 결과 JSON을 저장합니다.
+
+5. `Step 5: Diagnose`  
+   - 실행 결과/로그를 분석해 실패 원인 및 다음 iteration 개선 피드백을 생성합니다.
+
+6. `Final Report`  
+   - 전체 iteration 결과를 취합해 `report.html`, `report.json`을 만듭니다.
+
+## 환경 설정
+1. Python 가상환경 생성/활성화
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
 ```
 
----
-
-## 실행 방법
-
-### 1) 환경 준비
+2. 패키지 설치
 
 ```bash
 pip install -r requirements.txt
 ```
 
-`.env` 파일에 Gemini API Key를 설정합니다.
+3. API Key 설정
 
 ```bash
-GEMINI_API_KEY=your_api_key
+cp .env.example .env
 ```
 
-### 2) 파이프라인 실행
+`.env` 파일에 아래 값을 설정합니다.
+
+```bash
+GEMINI_API_KEY=YOUR_API_KEY
+```
+
+## 사용 방법
+### 1) 파이프라인 실행
 
 ```bash
 python3 main.py --config config/dacon.json
 ```
 
-실행이 끝나면 `runs/<run_id>/` 하위에 iteration별 결과와 `report.html`이 생성됩니다.
-
-### 3) 생성된 모듈 + AutoGluon으로 제출 파일 생성
+다른 데이터셋 설정 예시:
 
 ```bash
-python3 submission.py --config config/dacon.json --run_id <run_id>
+python3 main.py --config config/kaggle.json
 ```
 
-`submission.data.output_path`에 `submission.csv`가 저장됩니다.
-
----
-
-## 실행 단계별 역할
-
-오케스트레이터는 각 iteration마다 아래 단계를 순서대로 수행합니다.
-
-### 1. Profiling (`src/modules/profile.py`)
-
-- LLM이 EDA 코드를 생성하고 실행하여 데이터 특성을 분석합니다.
-- 결과는 `profile/profile.json` 등에 저장됩니다.
-- 이전 iteration의 diagnose 결과가 있으면 핵심 피드백을 같이 반영합니다.
-
-### 2. Hypothesis (`src/modules/hypothesis.py`)
-
-- Profiling 결과를 바탕으로 전처리/피처엔지니어링 가설을 생성합니다.
-- 출력은 `hypothesis/hypothesis.json`으로 저장됩니다.
-
-### 3. Implement (`src/modules/implement.py`)
-
-- 가설을 기반으로 실제 실행 가능한 코드(`preprocessor.py`, `feature_engineering.py`)를 생성합니다.
-- 문법 체크 및 인터페이스 계약(validator 호환) 스모크 체크를 수행합니다.
-- 실패 시 재생성(설정 기반 재시도)이 가능합니다.
-
-### 4. Execute (`src/modules/execute.py`)
-
-- `src/val_wrapper.py`를 호출해 생성 코드의 성능을 검증합니다.
-- CV 결과(`cv_result.json`), 표준 출력/에러 로그를 저장합니다.
-- 하드 실패 시 implement fallback(재생성 후 재실행)을 수행할 수 있습니다.
-
-### 5. Diagnose (`src/modules/diagnose.py`)
-
-- LLM이 execute 결과(점수/로그/비교 정보)를 분석합니다.
-- 다음 iteration에서 사용할 구체적 피드백을 생성합니다.
-- 출력은 `diagnose/diagnose.json`으로 저장됩니다.
-
-### 6. Report (`src/modules/report.py`)
-
-- 전체 iteration 결과를 취합해 `report.html`, `report.json`을 생성합니다.
-- iteration별 성능, diagnose 요약, feature 관련 정보 등을 확인할 수 있습니다.
-
----
-
-## 주요 산출물
-
-- `runs/<run_id>/iteration_<n>/profile/profile.json`
-- `runs/<run_id>/iteration_<n>/hypothesis/hypothesis.json`
-- `runs/<run_id>/iteration_<n>/implement/preprocessor.py`
-- `runs/<run_id>/iteration_<n>/implement/feature_engineering.py`
+실행 후 산출물:
+- `runs/<run_id>/config.json`
+- `runs/<run_id>/iteration_<n>/profile/`
+- `runs/<run_id>/iteration_<n>/hypothesis/`
+- `runs/<run_id>/iteration_<n>/implement/implement_pipeline.py`
 - `runs/<run_id>/iteration_<n>/execute/cv_result.json`
-- `runs/<run_id>/iteration_<n>/diagnose/diagnose.json`
-- `runs/<run_id>/report.html`
-- `runs/<run_id>/report.json`
+- `runs/<run_id>/iteration_<n>/diagnose/`
+- `runs/<run_id>/report.html`, `runs/<run_id>/report.json`
 
----
+### 2) 제출 파일 생성
 
-## 참고
+```bash
+python3 submission.py --config config/dacon.json --run_id <RUN_ID> --iteration <ITER>
+```
 
-- `baseline/`은 LLM 없이 AutoGluon만 사용하는 비교 실험용 baseline입니다.
-- `config/dacon.json`에서 iteration 수, 모델, 토큰 수, validation 옵션 등을 조절할 수 있습니다.
+동작 방식:
+- 기본적으로 해당 iteration의 `implement_pipeline.py`를 사용합니다.
+- 필요 시 직접 스크립트 지정 가능:
+
+```bash
+python3 submission.py --config config/dacon.json --run_id <RUN_ID> --iteration <ITER> --pipeline_script_path runs/<RUN_ID>/iteration_<ITER>/implement/implement_pipeline.py
+```
