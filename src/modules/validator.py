@@ -1,9 +1,6 @@
 from __future__ import annotations
 
-import importlib.util
 import re
-from pathlib import Path
-from types import ModuleType
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import numpy as np
@@ -24,64 +21,6 @@ from sklearn.preprocessing import LabelEncoder
 SAFE_FEATURE_NAME_PATTERN = re.compile(r"^[A-Za-z0-9_]+$")
 
 
-class _DefaultPreprocessor:
-    @staticmethod
-    def fit_preprocessor(train_df: pd.DataFrame, label_col: str, config: Dict[str, Any]) -> Dict[str, Any]:
-        del label_col, config
-        return {"columns": [str(col) for col in train_df.columns]}
-
-    @staticmethod
-    def transform_preprocessor(df: pd.DataFrame, prep_state: Dict[str, Any], config: Dict[str, Any]) -> pd.DataFrame:
-        del prep_state, config
-        return df.copy()
-
-
-class _DefaultFeatureEngineering:
-    FEATURE_BLOCKS = {"identity": {"description": "No feature engineering", "enabled_by_default": True}}
-
-    @staticmethod
-    def fit_feature_engineering(
-        train_df: pd.DataFrame,
-        label_col: str,
-        config: Dict[str, Any],
-        enabled_blocks: Optional[Iterable[str]] = None,
-    ) -> Dict[str, Any]:
-        del config
-        blocks = list(enabled_blocks) if enabled_blocks is not None else ["identity"]
-        feature_cols = [str(col) for col in train_df.columns if str(col) != str(label_col)]
-        return {"feature_cols": feature_cols, "enabled_blocks": blocks}
-
-    @staticmethod
-    def transform_feature_engineering(df: pd.DataFrame, fe_state: Dict[str, Any], config: Dict[str, Any]) -> pd.DataFrame:
-        del config
-        feature_cols = [col for col in fe_state.get("feature_cols", []) if col in df.columns]
-        out = df.loc[:, feature_cols].copy()
-        return out
-
-    @staticmethod
-    def feature_registry_from_state(fe_state: Dict[str, Any]) -> List[Dict[str, Any]]:
-        return [
-            {"feature": col, "block": "identity"}
-            for col in fe_state.get("feature_cols", [])
-        ]
-
-
-def load_preprocessor_module(module_path: Optional[str]) -> Any:
-    if module_path is None:
-        return _DefaultPreprocessor()
-    module = _load_module_from_path(module_path, "generated_preprocessor")
-    _assert_module_functions(module, ["fit_preprocessor", "transform_preprocessor"], "preprocessor")
-    return module
-
-
-def load_feature_engineering_module(module_path: Optional[str]) -> Any:
-    if module_path is None:
-        return _DefaultFeatureEngineering()
-    module = _load_module_from_path(module_path, "generated_feature_engineering")
-    _assert_module_functions(module, ["fit_feature_engineering", "transform_feature_engineering"], "feature_engineering")
-    return module
-
-
 def higher_is_better(metric: str) -> bool:
     return metric.lower() in {"f1", "accuracy", "roc_auc", "auc", "r2"}
 
@@ -93,6 +32,17 @@ def run_cross_validation(
     feature_module: Any,
     enabled_blocks: Optional[Iterable[str]] = None,
 ) -> Dict[str, Any]:
+    _assert_module_methods(
+        module=preprocessor_module,
+        required_methods=["fit_preprocessor", "transform_preprocessor"],
+        module_label="preprocessor_module",
+    )
+    _assert_module_methods(
+        module=feature_module,
+        required_methods=["fit_feature_engineering", "transform_feature_engineering"],
+        module_label="feature_module",
+    )
+
     label_col = _resolve_label_col(config=config, train_df=train_df)
     runtime_config = _build_module_runtime_config(config=config, label_col=label_col, enabled_blocks=enabled_blocks)
     modeling_cfg = _resolve_modeling_cfg(config)
@@ -116,11 +66,10 @@ def run_cross_validation(
     y_full = train_df[label_col]
     y_for_split = None
     n_classes: Optional[int] = None
-    label_encoder: Optional[LabelEncoder] = None
     if task_type == "classification":
-        label_encoder = LabelEncoder()
-        y_for_split = label_encoder.fit_transform(y_full.astype(str))
-        n_classes = int(len(label_encoder.classes_))
+        split_encoder = LabelEncoder()
+        y_for_split = split_encoder.fit_transform(y_full.astype(str))
+        n_classes = int(len(split_encoder.classes_))
 
     fold_scores: List[float] = []
     fold_details: List[Dict[str, Any]] = []
@@ -233,84 +182,6 @@ def run_cross_validation(
     }
 
 
-def fit_full_and_predict(
-    config: Dict[str, Any],
-    train_df: pd.DataFrame,
-    test_df: pd.DataFrame,
-    sample_submission_df: pd.DataFrame,
-    preprocessor_module: Any,
-    feature_module: Any,
-    enabled_blocks: Optional[Iterable[str]] = None,
-) -> Dict[str, Any]:
-    label_col = _resolve_label_col(config=config, train_df=train_df, test_df=test_df, sample_submission_df=sample_submission_df)
-    runtime_config = _build_module_runtime_config(config=config, label_col=label_col, enabled_blocks=enabled_blocks)
-    id_col = _resolve_id_col(config=config, train_df=train_df, test_df=test_df, sample_submission_df=sample_submission_df)
-    modeling_cfg = _resolve_modeling_cfg(config)
-    task_type = modeling_cfg["task_type"]
-    model_type = modeling_cfg["model_type"]
-    model_params = modeling_cfg["model_params"]
-    random_state = modeling_cfg["random_state"]
-
-    prep_state = preprocessor_module.fit_preprocessor(train_df.copy(), label_col, runtime_config)
-    train_pre = preprocessor_module.transform_preprocessor(train_df.copy(), prep_state, runtime_config)
-    test_pre = preprocessor_module.transform_preprocessor(test_df.copy(), prep_state, runtime_config)
-    train_pre, test_pre = _normalize_preprocessed_pair(
-        train_pre=train_pre,
-        other_pre=test_pre,
-        label_col=label_col,
-    )
-    _assert_label_exists(train_pre, label_col, "train_preprocessed")
-
-    fe_state = feature_module.fit_feature_engineering(
-        train_df=train_pre.copy(),
-        label_col=label_col,
-        config=runtime_config,
-        enabled_blocks=enabled_blocks,
-    )
-    x_train_raw = feature_module.transform_feature_engineering(train_pre.copy(), fe_state, runtime_config)
-    x_test_raw = feature_module.transform_feature_engineering(test_pre.copy(), fe_state, runtime_config)
-    x_train, x_test = _align_and_encode_pair(x_train_raw, x_test_raw)
-
-    if task_type == "classification":
-        y_train_str = train_pre[label_col].astype(str)
-        label_encoder = LabelEncoder()
-        y_train = label_encoder.fit_transform(y_train_str)
-        n_classes = int(len(label_encoder.classes_))
-        model, model_type_used = _build_model(
-            task_type=task_type,
-            model_type=model_type,
-            random_state=random_state,
-            model_params=model_params,
-            n_classes=n_classes,
-        )
-        model.fit(x_train, y_train)
-        pred_encoded = np.asarray(model.predict(x_test)).astype(int)
-        y_test_pred = label_encoder.inverse_transform(pred_encoded)
-    else:
-        y_train = pd.to_numeric(train_pre[label_col], errors="coerce").fillna(0.0).to_numpy()
-        model, model_type_used = _build_model(
-            task_type=task_type,
-            model_type=model_type,
-            random_state=random_state,
-            model_params=model_params,
-            n_classes=None,
-        )
-        model.fit(x_train, y_train)
-        y_test_pred = np.asarray(model.predict(x_test))
-
-    submission = sample_submission_df.copy()
-    if id_col is not None and id_col in test_df.columns and id_col in submission.columns:
-        submission[id_col] = test_df[id_col].values
-    submission[label_col] = y_test_pred
-
-    return {
-        "submission_df": submission,
-        "model_type_used": model_type_used,
-        "fe_state": fe_state,
-        "feature_registry": _feature_registry_from_state(feature_module, fe_state),
-    }
-
-
 def _resolve_modeling_cfg(config: Dict[str, Any]) -> Dict[str, Any]:
     modeling = config.get("modeling", {}) or {}
     validation = modeling.get("validation", {}) or {}
@@ -347,44 +218,13 @@ def _build_module_runtime_config(
 def _resolve_label_col(
     config: Dict[str, Any],
     train_df: pd.DataFrame,
-    test_df: Optional[pd.DataFrame] = None,
-    sample_submission_df: Optional[pd.DataFrame] = None,
 ) -> str:
     data_cfg = config.get("data", {}) or {}
     configured = data_cfg.get("label_col")
     if configured is not None:
         return str(configured)
 
-    if sample_submission_df is not None and test_df is not None:
-        candidate = [col for col in sample_submission_df.columns if col not in test_df.columns]
-        if len(candidate) == 1:
-            return str(candidate[0])
-        if len(sample_submission_df.columns) >= 2:
-            return str(sample_submission_df.columns[-1])
-
     return str(train_df.columns[-1])
-
-
-def _resolve_id_col(
-    config: Dict[str, Any],
-    train_df: pd.DataFrame,
-    test_df: pd.DataFrame,
-    sample_submission_df: Optional[pd.DataFrame] = None,
-) -> Optional[str]:
-    data_cfg = config.get("data", {}) or {}
-    configured = data_cfg.get("id_col")
-    if configured is not None:
-        return str(configured)
-
-    if sample_submission_df is not None:
-        for col in sample_submission_df.columns:
-            if col in test_df.columns:
-                return str(col)
-
-    for col in test_df.columns:
-        if col in train_df.columns:
-            return str(col)
-    return None
 
 
 def _build_splitter(
@@ -652,19 +492,7 @@ def _assert_label_exists(df: pd.DataFrame, label_col: str, stage_name: str) -> N
         raise ValueError(f"{stage_name} must contain label column '{label_col}'")
 
 
-def _load_module_from_path(module_path: str, module_name: str) -> ModuleType:
-    path = Path(module_path)
-    if not path.exists():
-        raise FileNotFoundError(f"Module path not found: {path}")
-    spec = importlib.util.spec_from_file_location(module_name, str(path))
-    if spec is None or spec.loader is None:
-        raise ImportError(f"Unable to load module spec: {path}")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-def _assert_module_functions(module: Any, required_functions: List[str], module_label: str) -> None:
-    missing = [name for name in required_functions if not hasattr(module, name)]
+def _assert_module_methods(module: Any, required_methods: List[str], module_label: str) -> None:
+    missing = [name for name in required_methods if not hasattr(module, name)]
     if missing:
         raise ValueError(f"{module_label} module missing required function(s): {missing}")

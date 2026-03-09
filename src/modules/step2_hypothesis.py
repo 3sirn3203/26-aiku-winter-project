@@ -254,8 +254,9 @@ def _run_hypothesis_web_research(
         max_context_chars=max_context_chars,
         max_insight_items=max_insight_items,
     )
-    prompt = HYPOTHESIS_WEB_RESEARCH_PROMPT.format(
-        profile_context_json=json.dumps(profile_context, ensure_ascii=False),
+    prompt = HYPOTHESIS_WEB_RESEARCH_PROMPT.replace(
+        "{profile_context_json}",
+        json.dumps(profile_context, ensure_ascii=False),
     )
 
     last_raw_text = ""
@@ -271,8 +272,6 @@ def _run_hypothesis_web_research(
                     temperature=temperature,
                     top_p=top_p,
                     max_output_tokens=max_output_tokens,
-                    response_mime_type="application/json",
-                    response_schema=WebResearchResponse,
                     system_instruction=system_instruction,
                     tools=[types.Tool(google_search=types.GoogleSearch())],
                 ),

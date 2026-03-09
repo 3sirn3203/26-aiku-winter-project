@@ -203,6 +203,70 @@ def resolve_module_paths(
     return str(preprocessor_path), str(feature_path)
 
 
+def _resolve_relative_path(raw_path: str, impl_dir: Path) -> str:
+    path = Path(str(raw_path).strip())
+    if path.is_absolute():
+        return str(path)
+
+    direct = Path(path)
+    if direct.exists():
+        return str(direct)
+
+    impl_relative = impl_dir / path
+    if impl_relative.exists():
+        return str(impl_relative)
+
+    return str(direct)
+
+
+def resolve_pipeline_script_path(
+    run_id: str,
+    iteration: int,
+    submission_cfg: Dict[str, Any],
+    pipeline_override: Optional[str],
+) -> Tuple[str, bool]:
+    impl_dir = Path("runs") / run_id / f"iteration_{iteration}" / "implement"
+    configured = pipeline_override or submission_cfg.get("pipeline_script_path")
+    explicitly_configured = bool(configured)
+    if configured:
+        return _resolve_relative_path(str(configured), impl_dir), explicitly_configured
+
+    summary_path = impl_dir / "implement_summary.json"
+    if summary_path.exists():
+        try:
+            summary = read_json(str(summary_path))
+            summary_pipeline_path = str(summary.get("pipeline_script_path", "")).strip()
+            if summary_pipeline_path:
+                return _resolve_relative_path(summary_pipeline_path, impl_dir), False
+        except Exception:
+            pass
+
+    return str(impl_dir / "implement_pipeline.py"), False
+
+
+def load_modules_from_pipeline_script(pipeline_script_path: str) -> Tuple[Any, Any]:
+    module = load_module_from_path(pipeline_script_path, "submission_generated_pipeline_module")
+
+    preprocessor_obj: Any = None
+    if hasattr(module, "GeneratedPreprocessor"):
+        candidate = getattr(module, "GeneratedPreprocessor")
+        preprocessor_obj = candidate() if inspect.isclass(candidate) else candidate
+
+    feature_obj: Any = None
+    if hasattr(module, "GeneratedFeatureEngineering"):
+        candidate = getattr(module, "GeneratedFeatureEngineering")
+        feature_obj = candidate() if inspect.isclass(candidate) else candidate
+
+    if preprocessor_obj is not None and feature_obj is not None:
+        assert_module_functions(preprocessor_obj, ["fit_preprocessor", "transform_preprocessor"], "generated_preprocessor")
+        assert_module_functions(feature_obj, ["fit_feature_engineering", "transform_feature_engineering"], "generated_feature_engineering")
+        return preprocessor_obj, feature_obj
+
+    assert_module_functions(module, ["fit_preprocessor", "transform_preprocessor"], "pipeline_script(preprocessor)")
+    assert_module_functions(module, ["fit_feature_engineering", "transform_feature_engineering"], "pipeline_script(feature_engineering)")
+    return module, module
+
+
 def apply_generated_feature_pipeline(
     config: Dict[str, Any],
     submission_data_cfg: Dict[str, Any],
@@ -277,6 +341,7 @@ def main() -> None:
     parser.add_argument("--run_id", type=str, default=None)
     parser.add_argument("--iteration", type=int, default=None)
     parser.add_argument("--output_path", type=str, default=None)
+    parser.add_argument("--pipeline_script_path", type=str, default=None)
     parser.add_argument("--preprocessor_path", type=str, default=None)
     parser.add_argument("--feature_path", type=str, default=None)
     args = parser.parse_args()
@@ -322,22 +387,69 @@ def main() -> None:
     if os.path.exists(output_path) and not allow_overwrite_output:
         raise FileExistsError(f"Submission file already exists: {output_path}")
 
-    preprocessor_path, feature_path = resolve_module_paths(
-        run_id=run_id,
-        iteration=iteration,
-        submission_cfg=submission_cfg,
-        preprocessor_override=args.preprocessor_path,
-        feature_override=args.feature_path,
-    )
-    if not os.path.exists(preprocessor_path):
-        raise FileNotFoundError(f"Preprocessor module not found: {preprocessor_path}")
-    if not os.path.exists(feature_path):
-        raise FileNotFoundError(f"Feature engineering module not found: {feature_path}")
+    if args.pipeline_script_path and (args.preprocessor_path or args.feature_path):
+        raise ValueError(
+            "Use either --pipeline_script_path or (--preprocessor_path/--feature_path), not both."
+        )
 
-    preprocessor_module = load_module_from_path(preprocessor_path, "submission_preprocessor_module")
-    feature_module = load_module_from_path(feature_path, "submission_feature_engineering_module")
-    assert_module_functions(preprocessor_module, ["fit_preprocessor", "transform_preprocessor"], "preprocessor")
-    assert_module_functions(feature_module, ["fit_feature_engineering", "transform_feature_engineering"], "feature_engineering")
+    module_source = "pipeline_script"
+    pipeline_script_path: Optional[str] = None
+    preprocessor_path: Optional[str] = None
+    feature_path: Optional[str] = None
+
+    legacy_override = bool(args.preprocessor_path or args.feature_path)
+    if legacy_override:
+        module_source = "legacy_modules"
+        preprocessor_path, feature_path = resolve_module_paths(
+            run_id=run_id,
+            iteration=iteration,
+            submission_cfg=submission_cfg,
+            preprocessor_override=args.preprocessor_path,
+            feature_override=args.feature_path,
+        )
+        if not os.path.exists(preprocessor_path):
+            raise FileNotFoundError(f"Preprocessor module not found: {preprocessor_path}")
+        if not os.path.exists(feature_path):
+            raise FileNotFoundError(f"Feature engineering module not found: {feature_path}")
+
+        preprocessor_module = load_module_from_path(preprocessor_path, "submission_preprocessor_module")
+        feature_module = load_module_from_path(feature_path, "submission_feature_engineering_module")
+        assert_module_functions(preprocessor_module, ["fit_preprocessor", "transform_preprocessor"], "preprocessor")
+        assert_module_functions(feature_module, ["fit_feature_engineering", "transform_feature_engineering"], "feature_engineering")
+    else:
+        pipeline_script_path, explicitly_configured = resolve_pipeline_script_path(
+            run_id=run_id,
+            iteration=iteration,
+            submission_cfg=submission_cfg,
+            pipeline_override=args.pipeline_script_path,
+        )
+        if not os.path.exists(pipeline_script_path):
+            if explicitly_configured:
+                raise FileNotFoundError(f"Pipeline script not found: {pipeline_script_path}")
+
+            module_source = "legacy_modules"
+            preprocessor_path, feature_path = resolve_module_paths(
+                run_id=run_id,
+                iteration=iteration,
+                submission_cfg=submission_cfg,
+                preprocessor_override=args.preprocessor_path,
+                feature_override=args.feature_path,
+            )
+            if not os.path.exists(preprocessor_path):
+                raise FileNotFoundError(
+                    f"Pipeline script not found ({pipeline_script_path}) and preprocessor module not found: {preprocessor_path}"
+                )
+            if not os.path.exists(feature_path):
+                raise FileNotFoundError(
+                    f"Pipeline script not found ({pipeline_script_path}) and feature engineering module not found: {feature_path}"
+                )
+
+            preprocessor_module = load_module_from_path(preprocessor_path, "submission_preprocessor_module")
+            feature_module = load_module_from_path(feature_path, "submission_feature_engineering_module")
+            assert_module_functions(preprocessor_module, ["fit_preprocessor", "transform_preprocessor"], "preprocessor")
+            assert_module_functions(feature_module, ["fit_feature_engineering", "transform_feature_engineering"], "feature_engineering")
+        else:
+            preprocessor_module, feature_module = load_modules_from_pipeline_script(pipeline_script_path)
 
     train_df = load_csv(train_path)
     test_df = load_csv(test_path)
@@ -384,8 +496,12 @@ def main() -> None:
     submission_df.to_csv(output_path, index=False, encoding="utf-8-sig")
 
     print(f"[INFO] run_id: {run_id}, iteration: {iteration}")
-    print(f"[INFO] preprocessor: {preprocessor_path}")
-    print(f"[INFO] feature_engineering: {feature_path}")
+    print(f"[INFO] module_source: {module_source}")
+    if module_source == "pipeline_script":
+        print(f"[INFO] pipeline_script: {pipeline_script_path}")
+    else:
+        print(f"[INFO] preprocessor: {preprocessor_path}")
+        print(f"[INFO] feature_engineering: {feature_path}")
     print(f"[INFO] model saved to: {model_path}")
     print(f"[INFO] submission saved to: {output_path}")
 

@@ -17,71 +17,55 @@ def execute(
     execute_dir = os.path.join(iteration_dir, "execute")
     os.makedirs(execute_dir, exist_ok=True)
 
-    preprocessor_path = str(implement_result.get("preprocessor_path", "")).strip()
-    feature_engineering_path = str(implement_result.get("feature_engineering_path", "")).strip()
-    if not preprocessor_path or not feature_engineering_path:
+    pipeline_script_path = str(implement_result.get("pipeline_script_path", "")).strip()
+    if not pipeline_script_path:
         return _hard_failure(
             execute_dir=execute_dir,
-            reason="missing_generated_module_paths",
-            detail={
-                "preprocessor_path": preprocessor_path,
-                "feature_engineering_path": feature_engineering_path,
-            },
+            reason="missing_pipeline_script_path",
+            detail={"pipeline_script_path": pipeline_script_path},
         )
 
+    return _execute_pipeline_script(
+        execute_cfg=execute_cfg,
+        execute_dir=execute_dir,
+        pipeline_script_path=pipeline_script_path,
+    )
+
+
+def _execute_pipeline_script(
+    execute_cfg: Dict[str, Any],
+    execute_dir: str,
+    pipeline_script_path: str,
+) -> Dict[str, Any]:
     syntax_check = bool(execute_cfg.get("syntax_check_generated_modules", True))
     if syntax_check:
-        ok, reason = _py_compile_check([preprocessor_path, feature_engineering_path])
+        ok, reason = _py_compile_check([pipeline_script_path])
         if not ok:
             return _hard_failure(
                 execute_dir=execute_dir,
-                reason="generated_module_syntax_error",
+                reason="generated_pipeline_syntax_error",
                 detail={"error": reason},
             )
 
-    validation_script = str(execute_cfg.get("validation_script", "src/val_wrapper.py"))
-    validation_module = str(execute_cfg.get("validation_module", "")).strip()
     output_json = str(execute_cfg.get("output_json", os.path.join(execute_dir, "cv_result.json")))
-    predict_test = bool(execute_cfg.get("predict_test", False))
-    submission_out = str(execute_cfg.get("submission_out", os.path.join(execute_dir, "submission.csv")))
     timeout_sec = int(execute_cfg.get("timeout_sec", 1800))
     python_bin = str(execute_cfg.get("python_bin", sys.executable))
+    config_path = str(execute_cfg.get("config_path", "config/dacon.json"))
 
-    cmd: List[str] = [python_bin]
-    if validation_module:
-        cmd.extend(["-m", validation_module])
-    else:
-        module_from_script = _script_to_module(validation_script)
-        if module_from_script is not None:
-            cmd.extend(["-m", module_from_script])
-        else:
-            cmd.append(validation_script)
-
-    cmd.extend(
-        [
-            "--config",
-            str(execute_cfg.get("config_path", "config/dacon.json")),
-            "--preprocessor-path",
-            preprocessor_path,
-            "--feature-engineering-path",
-            feature_engineering_path,
-            "--output-json",
-            output_json,
-        ]
-    )
-
-    _append_optional_arg(cmd, "--cv-type", execute_cfg.get("cv_type"))
-    _append_optional_arg(cmd, "--n-splits", execute_cfg.get("n_splits"))
-    _append_optional_arg(cmd, "--model-type", execute_cfg.get("model_type"))
-    _append_optional_arg(cmd, "--metric", execute_cfg.get("metric"))
+    cmd: List[str] = [
+        python_bin,
+        pipeline_script_path,
+        "--config",
+        config_path,
+        "--output-json",
+        output_json,
+    ]
+    _append_optional_arg(cmd, "--train-path", execute_cfg.get("train_path"))
 
     enabled_blocks = execute_cfg.get("enabled_blocks")
     if isinstance(enabled_blocks, list):
         enabled_blocks = ",".join([str(x).strip() for x in enabled_blocks if str(x).strip()])
     _append_optional_arg(cmd, "--enabled-blocks", enabled_blocks)
-
-    if predict_test:
-        cmd.extend(["--predict-test", "--submission-out", submission_out])
 
     try:
         run_result = subprocess.run(
@@ -156,7 +140,6 @@ def execute(
         "stdout_path": stdout_path,
         "stderr_path": stderr_path,
         "cv_result_path": output_json,
-        "submission_path": submission_out if predict_test else None,
         "cv_result": cv_result,
     }
     with open(os.path.join(execute_dir, "execute_result.json"), "w", encoding="utf-8") as file:
@@ -171,22 +154,6 @@ def _append_optional_arg(cmd: List[str], flag: str, value: Any) -> None:
     if text == "":
         return
     cmd.extend([flag, text])
-
-
-def _script_to_module(validation_script: str) -> Optional[str]:
-    script = validation_script.strip()
-    if not script:
-        return None
-    if script.endswith(".py"):
-        normalized = script.replace("\\", "/")
-        if normalized.startswith("./"):
-            normalized = normalized[2:]
-        if normalized.startswith("/"):
-            return None
-        module = normalized[:-3].replace("/", ".")
-        if module:
-            return module
-    return None
 
 
 def _py_compile_check(module_paths: List[str]) -> tuple[bool, str]:

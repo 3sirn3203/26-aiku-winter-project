@@ -5,12 +5,12 @@ from typing import Any, Dict, List
 from google import genai
 
 from src.utils import utc_run_id
-from src.modules.profile import profiling
-from src.modules.hypothesis import generate_hypotheses
-from src.modules.implement import implement
-from src.modules.execute import execute
-from src.modules.diagnose import diagnose
-from src.modules.report import make_report
+from src.modules.step1_profile import profiling
+from src.modules.step2_hypothesis import generate_hypotheses
+from src.modules.step3_implement import implement
+from src.modules.step4_execute import execute
+from src.modules.step5_diagnose import diagnose
+from src.modules.final_report import make_report
 
 
 def _load_llm() -> genai.Client:
@@ -98,7 +98,6 @@ def run_pipeline(config: Dict) -> Dict:
         print("  Step 4: Execute")
         execute_cfg_for_iter = dict(execute_cfg)
         execute_cfg_for_iter.setdefault("config_path", run_config_path)
-        execute_cfg_for_iter.setdefault("validation_script", "src/val_wrapper.py")
         max_fallbacks = int(execute_cfg_for_iter.get("max_implement_fallbacks", 1))
         fallback_count = 0
         execute_attempts: List[Dict] = []

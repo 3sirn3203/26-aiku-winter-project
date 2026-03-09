@@ -12,17 +12,20 @@ def load_config(config_path: str) -> dict:
         config = json.load(f)
     return config
 
-def main() -> None:
+def main():
     parser = ArgumentParser()
     parser.add_argument("--config", type=str, default="config/dacon.json", help="Path to YAML config.")
     args = parser.parse_args()
 
     load_dotenv()
+
     if not os.path.exists(args.config):
         raise FileNotFoundError(f"Config file not found: {args.config}")
+    
     config = load_config(args.config)
     result = run_pipeline(config)
 
+    # Print summary of results
     print("Pipeline finished.")
     print(f"Run ID: {result['run_id']}")
     print(f"Run Dir: {result['run_dir']}")
