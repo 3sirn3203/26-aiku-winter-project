@@ -1,5 +1,7 @@
 # 26-Winter Project: LLM 기반 Tabular Feature Engineering
 
+![프로젝트 워크플로우](assets/figure.png)
+
 ## 소개
 이 프로젝트는 LLM이 tabular 데이터의 전처리/피처 엔지니어링 코드를 반복적으로 개선하고, CV 결과를 기반으로 다음 시도를 자동으로 조정하는 실험 파이프라인입니다.
 
