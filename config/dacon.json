@@ -24,7 +24,17 @@
             "temperature": 0.2,
             "max_tokens": 8192,
             "top_p": 0.9,
-            "max_attempts": 2
+            "max_attempts": 2,
+            "web_search": {
+                "enabled": true,
+                "model": "gemini-2.5-flash",
+                "temperature": 0.2,
+                "max_tokens": 4096,
+                "top_p": 0.9,
+                "max_attempts": 2,
+                "max_context_chars": 4000,
+                "max_insight_items": 8
+            }
         },
         "implement": {
             "model": "gemini-3-pro-preview",

@@ -16,7 +16,12 @@ Output format (STRICT JSON object):
 Rules:
 - Focus on hypotheses that can be implemented and evaluated in the next steps.
 - Avoid generic advice. Use the provided profile evidence.
+- Use web research evidence as supporting references when available.
+- If web research is unavailable, rely on profile evidence only.
 - Do not output markdown.
 
 Profile result:
 {{ profile_result_json }}
+
+Web research result (nullable JSON):
+{{ web_research_json }}
