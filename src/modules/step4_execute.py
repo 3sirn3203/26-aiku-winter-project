@@ -51,6 +51,16 @@ def _execute_pipeline_script(
     timeout_sec = int(execute_cfg.get("timeout_sec", 1800))
     python_bin = str(execute_cfg.get("python_bin", sys.executable))
     config_path = str(execute_cfg.get("config_path", "config/dacon.json"))
+    success_stdout_log_max_chars = int(execute_cfg.get("success_stdout_log_max_chars", 3000))
+    success_stderr_log_max_chars = int(execute_cfg.get("success_stderr_log_max_chars", 1500))
+    project_root = Path(__file__).resolve().parents[2]
+    env = os.environ.copy()
+    existing_pythonpath = str(env.get("PYTHONPATH", "")).strip()
+    env["PYTHONPATH"] = (
+        f"{project_root}{os.pathsep}{existing_pythonpath}"
+        if existing_pythonpath
+        else str(project_root)
+    )
 
     cmd: List[str] = [
         python_bin,
@@ -74,6 +84,8 @@ def _execute_pipeline_script(
             text=True,
             check=False,
             timeout=timeout_sec,
+            cwd=str(project_root),
+            env=env,
         )
     except subprocess.TimeoutExpired as exc:
         return _hard_failure(
@@ -144,6 +156,27 @@ def _execute_pipeline_script(
     }
     with open(os.path.join(execute_dir, "execute_result.json"), "w", encoding="utf-8") as file:
         json.dump(result, file, ensure_ascii=False, indent=2)
+
+    print(
+        "    [Step4:execute] SUCCESS "
+        f"metric={cv_result.get('metric')} "
+        f"mean_cv={cv_result.get('mean_cv')} "
+        f"std_cv={cv_result.get('std_cv')} "
+        f"objective_mean={cv_result.get('objective_mean')}"
+    )
+    print(
+        "    [Step4:execute] artifacts "
+        f"stdout={stdout_path} stderr={stderr_path} cv_json={output_json}"
+    )
+    stdout_text = str(run_result.stdout or "").strip()
+    if stdout_text:
+        print("    [Step4:execute] stdout (tail):")
+        print(_tail_for_log(stdout_text, success_stdout_log_max_chars))
+    stderr_text = str(run_result.stderr or "").strip()
+    if stderr_text:
+        print("    [Step4:execute] stderr (tail):")
+        print(_tail_for_log(stderr_text, success_stderr_log_max_chars))
+
     return result
 
 
@@ -181,3 +214,12 @@ def _hard_failure(execute_dir: str, reason: str, detail: Optional[Dict[str, Any]
     with open(os.path.join(execute_dir, "execute_result.json"), "w", encoding="utf-8") as file:
         json.dump(result, file, ensure_ascii=False, indent=2)
     return result
+
+
+def _tail_for_log(text: str, max_chars: int) -> str:
+    if max_chars <= 0:
+        return ""
+    normalized = str(text or "")
+    if len(normalized) <= max_chars:
+        return normalized
+    return "(truncated, showing tail)\n" + normalized[-max_chars:]

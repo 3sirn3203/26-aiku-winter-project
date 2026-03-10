@@ -107,33 +107,43 @@ def generate_hypotheses(
     last_error = ""
 
     for attempt in range(1, max_attempts + 1):
-        response = client.models.generate_content(
-            model=model,
-            contents=prompt,
-            config={
-                "temperature": temperature,
-                "top_p": top_p,
-                "max_output_tokens": max_output_tokens,
-                "response_mime_type": "application/json",
-                "response_schema": HypothesisResponse,
-                "system_instruction": system_instruction,
-            },
-        )
-        raw_text = str(getattr(response, "text", "") or "").strip()
-        last_raw_text = raw_text
-
         try:
+            print(
+                f"    [Step2:hypothesis] LLM attempt {attempt}/{max_attempts} "
+                f"(model={model}, prompt_chars={len(prompt)})"
+            )
+            response = client.models.generate_content(
+                model=model,
+                contents=prompt,
+                config={
+                    "temperature": temperature,
+                    "top_p": top_p,
+                    "max_output_tokens": max_output_tokens,
+                    "response_mime_type": "application/json",
+                    "response_schema": HypothesisResponse,
+                    "system_instruction": system_instruction,
+                },
+            )
+            response_meta = _extract_response_meta(response)
+            raw_text = str(getattr(response, "text", "") or "").strip()
+            last_raw_text = raw_text
+            print(
+                f"    [Step2:hypothesis] LLM attempt {attempt} "
+                f"response_chars={len(raw_text)} finish_reason={response_meta.get('finish_reason', 'unknown')}"
+            )
             parsed = _parse_hypothesis_response(response=response, raw_text=raw_text)
             normalized = parsed.model_dump()
             last_error = ""
+            print(f"    [Step2:hypothesis] LLM attempt {attempt} parsed successfully")
             break
         except Exception as exc:  # noqa: BLE001
             last_error = str(exc)
+            print(f"    [Step2:hypothesis] LLM attempt {attempt} failed: {last_error}")
             with open(os.path.join(hypothesis_dir, f"hypothesis_attempt_{attempt}.json"), "w", encoding="utf-8") as file:
                 json.dump(
                     {
                         "attempt": attempt,
-                        "raw_text": raw_text,
+                        "raw_text": last_raw_text,
                         "error": last_error,
                     },
                     file,
@@ -229,6 +239,7 @@ def _run_hypothesis_web_research(
     }
 
     if not enabled:
+        print("    [Step2:web_research] skipped (disabled)")
         with open(os.path.join(hypothesis_dir, "web_research.json"), "w", encoding="utf-8") as file:
             json.dump(result, file, ensure_ascii=False, indent=2)
         return result
@@ -265,6 +276,10 @@ def _run_hypothesis_web_research(
 
     for attempt in range(1, max_attempts + 1):
         try:
+            print(
+                f"    [Step2:web_research] LLM attempt {attempt}/{max_attempts} "
+                f"(model={model}, prompt_chars={len(prompt)})"
+            )
             response = client.models.generate_content(
                 model=model,
                 contents=prompt,
@@ -276,14 +291,21 @@ def _run_hypothesis_web_research(
                     tools=[types.Tool(google_search=types.GoogleSearch())],
                 ),
             )
+            response_meta = _extract_response_meta(response)
             raw_text = str(getattr(response, "text", "") or "").strip()
             last_raw_text = raw_text
+            print(
+                f"    [Step2:web_research] LLM attempt {attempt} "
+                f"response_chars={len(raw_text)} finish_reason={response_meta.get('finish_reason', 'unknown')}"
+            )
             parsed = _parse_hypothesis_web_research_response(response=response, raw_text=raw_text)
             normalized = parsed.model_dump()
             last_error = ""
+            print(f"    [Step2:web_research] LLM attempt {attempt} parsed successfully")
             break
         except Exception as exc:  # noqa: BLE001
             last_error = str(exc)
+            print(f"    [Step2:web_research] LLM attempt {attempt} failed: {last_error}")
             with open(os.path.join(hypothesis_dir, f"web_research_attempt_{attempt}.json"), "w", encoding="utf-8") as file:
                 json.dump(
                     {
@@ -387,3 +409,27 @@ def _parse_hypothesis_web_research_response(response: Any, raw_text: str) -> Web
 
     raw_obj = _parse_json_response(raw_text)
     return WebResearchResponse.model_validate(raw_obj)
+
+
+def _extract_response_meta(response: Any) -> Dict[str, Any]:
+    candidates = getattr(response, "candidates", None)
+    candidate_count = len(candidates) if isinstance(candidates, list) else 0
+
+    finish_reason = "unknown"
+    if isinstance(candidates, list) and candidates:
+        reason = getattr(candidates[0], "finish_reason", None)
+        if reason is not None:
+            finish_reason = str(reason)
+
+    total_token_count: Optional[int] = None
+    usage_metadata = getattr(response, "usage_metadata", None)
+    if usage_metadata is not None:
+        total = getattr(usage_metadata, "total_token_count", None)
+        if isinstance(total, int):
+            total_token_count = total
+
+    return {
+        "candidate_count": candidate_count,
+        "finish_reason": finish_reason,
+        "total_token_count": total_token_count,
+    }

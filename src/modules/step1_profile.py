@@ -59,6 +59,7 @@ def profiling(
     code_system_instruction = str(profile_cfg.get("system_instruction", PROFILE_CODE_SYSTEM_INSTRUCTION))
     max_codegen_attempts = int(profile_cfg.get("max_codegen_attempts", 2))
     execution_timeout_sec = int(profile_cfg.get("execution_timeout_sec", 120))
+    stdout_prompt_max_chars = int(profile_cfg.get("stdout_prompt_max_chars", 12000))
     basic_prompt_path = Path(str(profile_cfg.get("basic_prompt_path", "src/prompt/1_profile_basic.j2")))
     correlation_prompt_path = Path(str(profile_cfg.get("correlation_prompt_path", "src/prompt/1_profile_correlation.j2")))
     insight_prompt_path = Path(str(profile_cfg.get("insight_prompt_path", "src/prompt/1_profile_insight.j2")))
@@ -99,22 +100,13 @@ def profiling(
         execution_timeout_sec=execution_timeout_sec,
         system_instruction=code_system_instruction,
     )
-    basic_profile_prompt_context = _build_basic_profile_prompt_context(
-        basic_profile_json=basic_stage["profile_json"],
-        profile_cfg=profile_cfg,
-    )
+    basic_stdout_for_prompt = _trim_prompt_text(basic_stage["stdout"], max_chars=stdout_prompt_max_chars)
     _write_json(
         os.path.join(profile_dir, "profile_basic_prompt_context.json"),
-        basic_profile_prompt_context,
-    )
-    correlation_prompt_dataset_context = _build_correlation_prompt_dataset_context(
-        dataset_context=dataset_context,
-        basic_profile_prompt_context=basic_profile_prompt_context,
-        profile_cfg=profile_cfg,
-    )
-    _write_json(
-        os.path.join(profile_dir, "profile_correlation_prompt_context.json"),
-        correlation_prompt_dataset_context,
+        {
+            "dataset_context": dataset_context,
+            "basic_profile_stdout_preview": basic_stdout_for_prompt,
+        },
     )
 
     correlation_stage = _run_profile_codegen_stage(
@@ -124,8 +116,8 @@ def profiling(
         profile_dir=profile_dir,
         train_path=train_path,
         prompt_payload={
-            "dataset_context": json.dumps(correlation_prompt_dataset_context, ensure_ascii=False),
-            "basic_profile_json": json.dumps(basic_profile_prompt_context, ensure_ascii=False),
+            "dataset_context": json.dumps(dataset_context, ensure_ascii=False),
+            "basic_profile_stdout": basic_stdout_for_prompt,
             "previous_diagnose_json": (
                 json.dumps(diagnose_prompt_context, ensure_ascii=False)
                 if diagnose_prompt_context is not None
@@ -140,6 +132,18 @@ def profiling(
         execution_timeout_sec=execution_timeout_sec,
         system_instruction=code_system_instruction,
     )
+    correlation_stdout_for_prompt = _trim_prompt_text(
+        correlation_stage["stdout"],
+        max_chars=stdout_prompt_max_chars,
+    )
+    _write_json(
+        os.path.join(profile_dir, "profile_correlation_prompt_context.json"),
+        {
+            "dataset_context": dataset_context,
+            "basic_profile_stdout_preview": basic_stdout_for_prompt,
+            "correlation_profile_stdout_preview": correlation_stdout_for_prompt,
+        },
+    )
 
     insight_stage = _run_profile_insight_stage(
         client=client,
@@ -147,8 +151,8 @@ def profiling(
         profile_dir=profile_dir,
         prompt_payload={
             "dataset_context": json.dumps(dataset_context, ensure_ascii=False),
-            "basic_profile_json": json.dumps(basic_stage["profile_json"], ensure_ascii=False),
-            "correlation_profile_json": json.dumps(correlation_stage["profile_json"], ensure_ascii=False),
+            "basic_profile_stdout": basic_stdout_for_prompt,
+            "correlation_profile_stdout": correlation_stdout_for_prompt,
             "previous_diagnose_json": (
                 json.dumps(diagnose_prompt_context, ensure_ascii=False)
                 if diagnose_prompt_context is not None
@@ -168,11 +172,23 @@ def profiling(
         "insights": insight_stage["insight_json"].get("insights", []),
         "risks": insight_stage["insight_json"].get("risks", []),
         "recommended_next_actions": insight_stage["insight_json"].get("recommended_next_actions", []),
-        "basic_profile": basic_stage["profile_json"],
-        "correlation_profile": correlation_stage["profile_json"],
+        "basic_profile": {
+            "stdout_excerpt": basic_stdout_for_prompt,
+            "stdout_path": basic_stage["stdout_path"],
+        },
+        "correlation_profile": {
+            "stdout_excerpt": correlation_stdout_for_prompt,
+            "stdout_path": correlation_stage["stdout_path"],
+        },
         "stages": {
-            "basic": basic_stage["profile_json"],
-            "correlation": correlation_stage["profile_json"],
+            "basic": {
+                "stdout_excerpt": basic_stdout_for_prompt,
+                "stdout_path": basic_stage["stdout_path"],
+            },
+            "correlation": {
+                "stdout_excerpt": correlation_stdout_for_prompt,
+                "stdout_path": correlation_stage["stdout_path"],
+            },
             "insight": insight_stage["insight_json"],
         },
     }
@@ -224,8 +240,8 @@ def profiling(
                     "last_error": insight_stage["last_error"],
                 },
                 "diagnose_prompt_context": diagnose_prompt_context,
-                "basic_profile_prompt_context": basic_profile_prompt_context,
-                "correlation_prompt_dataset_context": correlation_prompt_dataset_context,
+                "basic_stdout_preview": basic_stdout_for_prompt,
+                "correlation_stdout_preview": correlation_stdout_for_prompt,
             },
             file,
             ensure_ascii=False,
@@ -256,7 +272,8 @@ def _run_profile_codegen_stage(
 
     execution_feedback: Optional[Dict[str, Any]] = None
     final_code = ""
-    final_profile_json: Optional[Dict[str, Any]] = None
+    final_stdout = ""
+    final_stderr = ""
     last_raw_text = ""
     last_error = ""
 
@@ -268,6 +285,10 @@ def _run_profile_codegen_stage(
             else "null"
         )
         prompt = prompt_template.render(**render_kwargs)
+        print(
+            f"    [Step1:{stage_name}] LLM attempt {attempt}/{max_codegen_attempts} "
+            f"model={model} prompt_chars={len(prompt)}"
+        )
 
         try:
             response = client.models.generate_content(
@@ -283,8 +304,14 @@ def _run_profile_codegen_stage(
             )
             raw_text = str(getattr(response, "text", "") or "").strip()
             last_raw_text = raw_text
+            response_meta = _extract_response_meta(response)
+            print(
+                f"    [Step1:{stage_name}] LLM attempt {attempt} "
+                f"response_chars={len(raw_text)} finish_reason={response_meta.get('finish_reason', '')}"
+            )
         except Exception as exc:  # noqa: BLE001
             last_error = f"llm_call_failed: {exc}"
+            print(f"    [Step1:{stage_name}] LLM attempt {attempt} failed: {last_error}")
             execution_feedback = {"attempt": attempt, "error": last_error}
             _write_json(
                 os.path.join(profile_dir, f"{stage_name}_llm_attempt_{attempt}.json"),
@@ -305,17 +332,32 @@ def _run_profile_codegen_stage(
                 os.path.join(profile_dir, f"{stage_name}_llm_attempt_{attempt}.json"),
                 {"raw_text": last_raw_text, "error": last_error},
             )
+            print(f"    [Step1:{stage_name}] LLM attempt {attempt} rejected: {last_error}")
+            continue
+        try:
+            _assert_has_main(eda_code)
+        except Exception as exc:  # noqa: BLE001
+            last_error = f"invalid_code_contract: {exc}"
+            execution_feedback = {
+                "attempt": attempt,
+                "error": last_error,
+                "stdout_tail": "",
+                "stderr_tail": "",
+            }
+            _write_json(
+                os.path.join(profile_dir, f"{stage_name}_llm_attempt_{attempt}.json"),
+                {"raw_text": last_raw_text, "error": last_error},
+            )
+            print(f"    [Step1:{stage_name}] LLM attempt {attempt} rejected: {last_error}")
             continue
 
         eda_script_path = os.path.join(profile_dir, f"{stage_name}_eda_attempt_{attempt}.py")
-        profile_json_path = os.path.join(profile_dir, f"profile_{stage_name}_attempt_{attempt}.json")
         with open(eda_script_path, "w", encoding="utf-8") as file:
             file.write(eda_code)
 
         exec_result = _execute_eda_script(
             script_path=eda_script_path,
             train_path=train_path,
-            profile_json_path=profile_json_path,
             timeout_sec=execution_timeout_sec,
         )
         _write_json(os.path.join(profile_dir, f"{stage_name}_exec_attempt_{attempt}.json"), exec_result)
@@ -325,35 +367,18 @@ def _run_profile_codegen_stage(
         )
 
         if exec_result["success"]:
-            try:
-                with open(profile_json_path, "r", encoding="utf-8") as file:
-                    loaded_profile = json.load(file)
-            except Exception as exc:  # noqa: BLE001
-                last_error = f"invalid_json_output: {exc}"
-                execution_feedback = {
-                    "attempt": attempt,
-                    "error": last_error,
-                    "stdout_tail": str(exec_result.get("stdout", ""))[-2000:],
-                    "stderr_tail": str(exec_result.get("stderr", ""))[-2000:],
-                }
-                continue
-
-            if not isinstance(loaded_profile, dict):
-                last_error = "profile_output_not_object"
-                execution_feedback = {
-                    "attempt": attempt,
-                    "error": last_error,
-                    "stdout_tail": str(exec_result.get("stdout", ""))[-2000:],
-                    "stderr_tail": str(exec_result.get("stderr", ""))[-2000:],
-                }
-                continue
-
             final_code = eda_code
-            final_profile_json = loaded_profile
+            final_stdout = str(exec_result.get("stdout", ""))
+            final_stderr = str(exec_result.get("stderr", ""))
             last_error = ""
+            print(
+                f"    [Step1:{stage_name}] EXEC attempt {attempt} success "
+                f"stdout_chars={len(final_stdout)} stderr_chars={len(final_stderr)}"
+            )
             break
 
         last_error = str(exec_result.get("error", "execution_failed"))
+        print(f"    [Step1:{stage_name}] EXEC attempt {attempt} failed: {last_error}")
         execution_feedback = {
             "attempt": attempt,
             "error": last_error,
@@ -361,7 +386,7 @@ def _run_profile_codegen_stage(
             "stderr_tail": str(exec_result.get("stderr", ""))[-2000:],
         }
 
-    if final_profile_json is None:
+    if not final_stdout.strip():
         raise RuntimeError(
             f"Profile {stage_name} stage failed: generated code could not be executed successfully. "
             f"Last error: {last_error}"
@@ -369,12 +394,19 @@ def _run_profile_codegen_stage(
 
     with open(os.path.join(profile_dir, f"{stage_name}_eda_generated.py"), "w", encoding="utf-8") as file:
         file.write(final_code)
-    with open(os.path.join(profile_dir, f"profile_{stage_name}.json"), "w", encoding="utf-8") as file:
-        json.dump(final_profile_json, file, ensure_ascii=False, indent=2)
+    stdout_path = os.path.join(profile_dir, f"profile_{stage_name}.stdout.txt")
+    stderr_path = os.path.join(profile_dir, f"profile_{stage_name}.stderr.txt")
+    with open(stdout_path, "w", encoding="utf-8") as file:
+        file.write(final_stdout)
+    with open(stderr_path, "w", encoding="utf-8") as file:
+        file.write(final_stderr)
 
     return {
         "code": final_code,
-        "profile_json": final_profile_json,
+        "stdout": final_stdout,
+        "stderr": final_stderr,
+        "stdout_path": stdout_path,
+        "stderr_path": stderr_path,
         "raw_text": last_raw_text,
     }
 
@@ -401,6 +433,10 @@ def _run_profile_insight_stage(
     last_error = ""
 
     for attempt in range(1, max_attempts + 1):
+        print(
+            f"    [Step1:insight] LLM attempt {attempt}/{max_attempts} "
+            f"model={model} prompt_chars={len(prompt)}"
+        )
         try:
             response = client.models.generate_content(
                 model=model,
@@ -416,13 +452,20 @@ def _run_profile_insight_stage(
             )
             raw_text = str(getattr(response, "text", "") or "").strip()
             last_raw_text = raw_text
+            response_meta = _extract_response_meta(response)
+            print(
+                f"    [Step1:insight] LLM attempt {attempt} "
+                f"response_chars={len(raw_text)} finish_reason={response_meta.get('finish_reason', '')}"
+            )
 
             parsed = _parse_profile_insight_response(response=response, raw_text=raw_text)
             normalized = parsed.model_dump()
             last_error = ""
+            print(f"    [Step1:insight] LLM attempt {attempt} parsed successfully")
             break
         except Exception as exc:  # noqa: BLE001
             last_error = str(exc)
+            print(f"    [Step1:insight] LLM attempt {attempt} failed: {last_error}")
             _write_json(
                 os.path.join(profile_dir, f"insight_attempt_{attempt}.json"),
                 {
@@ -458,270 +501,14 @@ def _run_profile_insight_stage(
 
 def _build_dataset_context(train_df: pd.DataFrame) -> Dict[str, Any]:
     dtypes = {col: str(dtype) for col, dtype in train_df.dtypes.items()}
-    missing_pct = (train_df.isna().mean() * 100).sort_values(ascending=False).head(20)
-    missing_top = [{"column": str(col), "missing_pct": float(val)} for col, val in missing_pct.items() if val > 0]
-    cardinality = train_df.nunique(dropna=False).sort_values(ascending=False).head(20)
-    cardinality_top = [{"column": str(col), "nunique": int(val)} for col, val in cardinality.items()]
-    sample_rows = train_df.head(5).fillna("__NA__").astype(str).to_dict(orient="records")
 
     return {
         "shape": {"rows": int(train_df.shape[0]), "cols": int(train_df.shape[1])},
         "columns": list(train_df.columns),
         "dtypes": dtypes,
-        "missing_top": missing_top,
-        "cardinality_top": cardinality_top,
-        "sample_rows": sample_rows,
     }
 
 
-def _build_basic_profile_prompt_context(
-    basic_profile_json: Dict[str, Any],
-    profile_cfg: Dict[str, Any],
-) -> Dict[str, Any]:
-    if not isinstance(basic_profile_json, dict):
-        return {}
-
-    missing_top_k = int(profile_cfg.get("basic_to_corr_missing_top_k", 10))
-    cardinality_top_k = int(profile_cfg.get("basic_to_corr_cardinality_top_k", 10))
-    leakage_top_k = int(profile_cfg.get("basic_to_corr_leakage_top_k", 6))
-    notes_top_k = int(profile_cfg.get("basic_to_corr_notes_top_k", 3))
-    max_text_chars = int(profile_cfg.get("basic_to_corr_text_max_chars", 140))
-
-    def _truncate_text(value: Any) -> str:
-        text = str(value or "").strip()
-        if len(text) > max_text_chars:
-            return text[: max_text_chars - 3] + "..."
-        return text
-
-    def _safe_float(value: Any) -> Optional[float]:
-        try:
-            return float(value)
-        except Exception:
-            return None
-
-    def _safe_int(value: Any) -> Optional[int]:
-        try:
-            return int(value)
-        except Exception:
-            return None
-
-    def _top_items_from_dict(dct: Any, top_k: int, descending: bool = True) -> List[Dict[str, Any]]:
-        if not isinstance(dct, dict):
-            return []
-        parsed: List[Dict[str, Any]] = []
-        for key, value in dct.items():
-            numeric = _safe_float(value)
-            if numeric is None:
-                continue
-            parsed.append({"column": _truncate_text(key), "value": numeric})
-        parsed.sort(key=lambda x: x["value"], reverse=descending)
-        return parsed[:top_k]
-
-    def _compact_summary(summary: Any) -> Dict[str, Any]:
-        if isinstance(summary, dict):
-            out: Dict[str, Any] = {}
-            for key in ["description", "numeric_cols", "object_cols", "boolean_cols", "total_cols"]:
-                if key in summary:
-                    value = summary[key]
-                    out[key] = _truncate_text(value) if isinstance(value, str) else value
-            if not out:
-                for key, value in list(summary.items())[:5]:
-                    out[str(key)] = _truncate_text(value) if isinstance(value, str) else value
-            return out
-        if isinstance(summary, str):
-            return {"description": _truncate_text(summary)}
-        return {}
-
-    def _compact_target(target: Any) -> Dict[str, Any]:
-        if not isinstance(target, dict):
-            return {}
-        out: Dict[str, Any] = {}
-        for key in ["column", "dtype", "nunique", "type"]:
-            if key in target:
-                value = target[key]
-                out[key] = _truncate_text(value) if isinstance(value, str) else value
-        value_counts = target.get("value_counts")
-        if isinstance(value_counts, dict):
-            compact_counts = []
-            for key, value in list(value_counts.items())[:5]:
-                compact_counts.append({"value": _truncate_text(key), "count": _safe_int(value)})
-            out["value_counts_top"] = compact_counts
-        return out
-
-    def _compact_leakage(leakage: Any) -> List[Dict[str, str]]:
-        if not isinstance(leakage, list):
-            return []
-        out: List[Dict[str, str]] = []
-        for item in leakage[:leakage_top_k]:
-            if isinstance(item, dict):
-                out.append(
-                    {
-                        "column": _truncate_text(item.get("column", "")),
-                        "reason": _truncate_text(item.get("reason", "")),
-                    }
-                )
-            else:
-                out.append({"column": "", "reason": _truncate_text(item)})
-        return out
-
-    def _compact_notes(notes: Any) -> List[str]:
-        if not isinstance(notes, list):
-            return []
-        return [_truncate_text(note) for note in notes[:notes_top_k]]
-
-    dtypes = basic_profile_json.get("dtypes")
-    dtype_counts: Dict[str, int] = {}
-    if isinstance(dtypes, dict):
-        raw_types = [str(v).lower() for v in dtypes.values()]
-        dtype_counts = {
-            "numeric": sum(1 for t in raw_types if ("int" in t or "float" in t or "double" in t)),
-            "object": sum(1 for t in raw_types if ("object" in t or "string" in t)),
-            "bool": sum(1 for t in raw_types if "bool" in t),
-            "other": sum(1 for t in raw_types if not any(x in t for x in ["int", "float", "double", "object", "string", "bool"])),
-        }
-
-    shape = basic_profile_json.get("shape", {})
-    compact_shape = {
-        "rows": _safe_int(shape.get("rows")) if isinstance(shape, dict) else None,
-        "cols": _safe_int(shape.get("cols")) if isinstance(shape, dict) else None,
-    }
-
-    missingness_top = _top_items_from_dict(
-        dct=basic_profile_json.get("missingness"),
-        top_k=missing_top_k,
-        descending=True,
-    )
-    missingness_top = [item for item in missingness_top if item["value"] > 0]
-
-    cardinality_top = _top_items_from_dict(
-        dct=basic_profile_json.get("cardinality"),
-        top_k=cardinality_top_k,
-        descending=True,
-    )
-
-    return {
-        "summary": _compact_summary(basic_profile_json.get("summary")),
-        "shape": compact_shape,
-        "dtype_counts": dtype_counts,
-        "missingness_top": [
-            {"column": item["column"], "missing_pct": round(float(item["value"]), 4)}
-            for item in missingness_top
-        ],
-        "cardinality_top": [
-            {"column": item["column"], "nunique": _safe_int(item["value"])}
-            for item in cardinality_top
-        ],
-        "target_candidates": _compact_target(basic_profile_json.get("target_candidates")),
-        "potential_leakage_signals": _compact_leakage(
-            basic_profile_json.get("potential_leakage_signals")
-        ),
-        "notes": _compact_notes(basic_profile_json.get("notes")),
-    }
-
-
-def _build_correlation_prompt_dataset_context(
-    dataset_context: Dict[str, Any],
-    basic_profile_prompt_context: Dict[str, Any],
-    profile_cfg: Dict[str, Any],
-) -> Dict[str, Any]:
-    if not isinstance(dataset_context, dict):
-        return {}
-
-    column_preview_k = int(profile_cfg.get("corr_context_column_preview_k", 20))
-    missing_top_k = int(profile_cfg.get("corr_context_missing_top_k", 10))
-    cardinality_top_k = int(profile_cfg.get("corr_context_cardinality_top_k", 10))
-    max_text_chars = int(profile_cfg.get("corr_context_text_max_chars", 100))
-
-    def _truncate_text(value: Any) -> str:
-        text = str(value or "").strip()
-        if len(text) > max_text_chars:
-            return text[: max_text_chars - 3] + "..."
-        return text
-
-    def _to_float(value: Any) -> Optional[float]:
-        try:
-            return float(value)
-        except Exception:
-            return None
-
-    dtypes = dataset_context.get("dtypes", {})
-    dtype_counts = {"numeric": 0, "object": 0, "bool": 0, "other": 0}
-    numeric_preview: List[str] = []
-    categorical_preview: List[str] = []
-    if isinstance(dtypes, dict):
-        for col, dtype in dtypes.items():
-            dtype_l = str(dtype).lower()
-            col_name = _truncate_text(col)
-            if "bool" in dtype_l:
-                dtype_counts["bool"] += 1
-            elif "int" in dtype_l or "float" in dtype_l or "double" in dtype_l:
-                dtype_counts["numeric"] += 1
-                if len(numeric_preview) < column_preview_k:
-                    numeric_preview.append(col_name)
-            elif "object" in dtype_l or "string" in dtype_l:
-                dtype_counts["object"] += 1
-                if len(categorical_preview) < column_preview_k:
-                    categorical_preview.append(col_name)
-            else:
-                dtype_counts["other"] += 1
-
-    columns = dataset_context.get("columns", [])
-    column_preview: List[str] = []
-    if isinstance(columns, list):
-        for col in columns[:column_preview_k]:
-            column_preview.append(_truncate_text(col))
-
-    missing_top = []
-    raw_missing_top = dataset_context.get("missing_top", [])
-    if isinstance(raw_missing_top, list):
-        for item in raw_missing_top[:missing_top_k]:
-            if not isinstance(item, dict):
-                continue
-            pct = _to_float(item.get("missing_pct"))
-            if pct is None or pct <= 0:
-                continue
-            missing_top.append(
-                {
-                    "column": _truncate_text(item.get("column", "")),
-                    "missing_pct": round(float(pct), 4),
-                }
-            )
-
-    cardinality_top = []
-    raw_cardinality_top = dataset_context.get("cardinality_top", [])
-    if isinstance(raw_cardinality_top, list):
-        for item in raw_cardinality_top[:cardinality_top_k]:
-            if not isinstance(item, dict):
-                continue
-            cardinality_top.append(
-                {
-                    "column": _truncate_text(item.get("column", "")),
-                    "nunique": item.get("nunique"),
-                }
-            )
-
-    shape = dataset_context.get("shape", {})
-    target_hint = basic_profile_prompt_context.get("target_candidates", {})
-
-    return {
-        "shape": {
-            "rows": shape.get("rows") if isinstance(shape, dict) else None,
-            "cols": shape.get("cols") if isinstance(shape, dict) else None,
-        },
-        "dtype_counts": dtype_counts,
-        "column_preview": column_preview,
-        "numeric_column_preview": numeric_preview,
-        "categorical_column_preview": categorical_preview,
-        "missing_top": missing_top,
-        "cardinality_top": cardinality_top,
-        "target_hint": {
-            "column": target_hint.get("column"),
-            "dtype": target_hint.get("dtype"),
-            "type": target_hint.get("type"),
-        }
-        if isinstance(target_hint, dict)
-        else {},
-    }
 
 
 def _build_diagnose_prompt_context(
@@ -843,10 +630,48 @@ def _extract_python_code(raw_text: str) -> str:
     return text
 
 
+def _assert_has_main(code: str) -> None:
+    import ast
+
+    tree = ast.parse(code)
+    has_main = any(
+        isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "main"
+        for node in ast.walk(tree)
+    )
+    if not has_main:
+        raise ValueError("Generated script must define main().")
+
+
+def _trim_prompt_text(text: str, max_chars: int) -> str:
+    normalized = str(text or "").strip()
+    if max_chars <= 0:
+        return ""
+    if len(normalized) <= max_chars:
+        return normalized
+    return normalized[:max_chars] + "\n...(truncated)"
+
+
+def _extract_response_meta(response: Any) -> Dict[str, Any]:
+    meta: Dict[str, Any] = {}
+    candidates = getattr(response, "candidates", None)
+    if isinstance(candidates, list):
+        meta["candidate_count"] = len(candidates)
+        if candidates:
+            first = candidates[0]
+            finish_reason = getattr(first, "finish_reason", None)
+            if finish_reason is not None:
+                meta["finish_reason"] = str(finish_reason)
+    usage = getattr(response, "usage_metadata", None)
+    if usage is not None:
+        total_tokens = getattr(usage, "total_token_count", None)
+        if total_tokens is not None:
+            meta["total_token_count"] = int(total_tokens)
+    return meta
+
+
 def _execute_eda_script(
     script_path: str,
     train_path: str,
-    profile_json_path: str,
     timeout_sec: int,
 ) -> Dict[str, Any]:
     cmd = [
@@ -854,8 +679,6 @@ def _execute_eda_script(
         script_path,
         "--train-path",
         train_path,
-        "--profile-json-out",
-        profile_json_path,
     ]
 
     try:
@@ -875,16 +698,17 @@ def _execute_eda_script(
             "returncode": None,
         }
 
-    success = proc.returncode == 0 and os.path.exists(profile_json_path)
+    stdout_text = str(proc.stdout or "")
+    success = proc.returncode == 0 and bool(stdout_text.strip())
     error = "" if success else f"returncode_{proc.returncode}"
-    if proc.returncode == 0 and not os.path.exists(profile_json_path):
+    if proc.returncode == 0 and not stdout_text.strip():
         success = False
-        error = "missing_profile_json_output"
+        error = "empty_stdout_output"
 
     return {
         "success": success,
         "error": error,
-        "stdout": proc.stdout,
+        "stdout": stdout_text,
         "stderr": proc.stderr,
         "returncode": proc.returncode,
     }

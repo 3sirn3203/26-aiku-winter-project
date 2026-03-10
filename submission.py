@@ -17,6 +17,107 @@ def read_json(path: str) -> Dict[str, Any]:
         return json.load(file)
 
 
+def _pick_best_iteration_from_report_payload(payload: Dict[str, Any]) -> Optional[int]:
+    best_summary = payload.get("best_summary")
+    if isinstance(best_summary, dict):
+        try:
+            return int(best_summary.get("iteration"))
+        except Exception:
+            pass
+
+    rows = payload.get("iterations")
+    if not isinstance(rows, list):
+        return None
+
+    best_iteration: Optional[int] = None
+    best_objective: Optional[float] = None
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        if not bool(row.get("success", False)):
+            continue
+        try:
+            iteration = int(row.get("iteration"))
+            objective_mean = float(row.get("objective_mean"))
+        except Exception:
+            continue
+        if best_objective is None or objective_mean > best_objective:
+            best_iteration = iteration
+            best_objective = objective_mean
+    return best_iteration
+
+
+def _pick_best_iteration_from_execute_results(run_dir: Path) -> Optional[int]:
+    best_iteration: Optional[int] = None
+    best_objective: Optional[float] = None
+    for path in sorted(run_dir.glob("iteration_*/execute/execute_result.json")):
+        match = re.match(r"iteration_(\d+)$", path.parent.parent.name)
+        if not match:
+            continue
+        try:
+            payload = read_json(str(path))
+        except Exception:
+            continue
+        if not bool(payload.get("success", False)):
+            continue
+        cv_result = payload.get("cv_result", {})
+        if not isinstance(cv_result, dict):
+            continue
+        try:
+            iteration = int(match.group(1))
+            objective_mean = float(cv_result.get("objective_mean"))
+        except Exception:
+            continue
+        if best_objective is None or objective_mean > best_objective:
+            best_iteration = iteration
+            best_objective = objective_mean
+    return best_iteration
+
+
+def resolve_best_iteration_from_run(run_id: str, config: Dict[str, Any]) -> Tuple[Optional[int], str]:
+    run_dir = Path("runs") / str(run_id).strip()
+    if not run_dir.exists():
+        return None, f"run_dir_not_found:{run_dir}"
+
+    fe_cfg = dict(config.get("feature_engineering", {}) or {})
+    report_cfg = dict(fe_cfg.get("report", {}) or {})
+    output_dir = str(report_cfg.get("output_dir", "")).strip()
+    report_json_filename = str(report_cfg.get("report_json_filename", "report.json")).strip() or "report.json"
+
+    candidate_paths: List[Path] = []
+    if output_dir:
+        candidate_paths.append(run_dir / output_dir / report_json_filename)
+    candidate_paths.append(run_dir / report_json_filename)
+    if report_json_filename != "report.json":
+        candidate_paths.append(run_dir / "report.json")
+
+    seen: set[str] = set()
+    unique_candidates: List[Path] = []
+    for path in candidate_paths:
+        key = str(path)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique_candidates.append(path)
+
+    for report_path in unique_candidates:
+        if not report_path.exists():
+            continue
+        try:
+            payload = read_json(str(report_path))
+        except Exception:
+            continue
+        best_iteration = _pick_best_iteration_from_report_payload(payload)
+        if best_iteration is not None:
+            return best_iteration, f"report:{report_path}"
+
+    fallback_iteration = _pick_best_iteration_from_execute_results(run_dir)
+    if fallback_iteration is not None:
+        return fallback_iteration, f"execute_results_scan:{run_dir}"
+
+    return None, f"best_iteration_not_found:{run_dir}"
+
+
 def load_csv(path: str) -> pd.DataFrame:
     if not os.path.exists(path):
         raise FileNotFoundError(f"CSV file not found: {path}")
@@ -354,7 +455,23 @@ def main() -> None:
     run_id = args.run_id or submission_cfg.get("run_id")
     if not run_id:
         raise ValueError("run_id is required. Set --run_id or submission.run_id in config.")
-    iteration = args.iteration if args.iteration is not None else int(submission_cfg.get("iteration", 1))
+
+    iteration_source = ""
+    if args.iteration is not None:
+        iteration = int(args.iteration)
+        iteration_source = "cli_arg"
+    else:
+        auto_best = bool(submission_cfg.get("use_best_iteration_from_run", True))
+        selected_iteration: Optional[int] = None
+        best_source = ""
+        if auto_best:
+            selected_iteration, best_source = resolve_best_iteration_from_run(run_id=run_id, config=config)
+        if selected_iteration is not None:
+            iteration = selected_iteration
+            iteration_source = best_source
+        else:
+            iteration = int(submission_cfg.get("iteration", 1))
+            iteration_source = "submission.iteration_fallback"
 
     submission_data_cfg = dict(submission_cfg.get("data", {}) or {})
     submission_model_cfg = dict(submission_cfg.get("model", {}) or {})
@@ -496,6 +613,7 @@ def main() -> None:
     submission_df.to_csv(output_path, index=False, encoding="utf-8-sig")
 
     print(f"[INFO] run_id: {run_id}, iteration: {iteration}")
+    print(f"[INFO] iteration_source: {iteration_source}")
     print(f"[INFO] module_source: {module_source}")
     if module_source == "pipeline_script":
         print(f"[INFO] pipeline_script: {pipeline_script_path}")
