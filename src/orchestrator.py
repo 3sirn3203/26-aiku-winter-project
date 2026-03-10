@@ -1,7 +1,9 @@
 from __future__ import annotations
 import os
 import json
-from typing import Any, Dict, List
+import re
+from pathlib import Path
+from typing import Any, Dict, List, Optional
 from google import genai
 
 from src.utils import utc_run_id
@@ -28,6 +30,10 @@ def run_pipeline(config: Dict) -> Dict:
     run_config_path = os.path.join(run_dir, "config.json")
     with open(run_config_path, "w", encoding="utf-8") as file:
         json.dump(config, file, ensure_ascii=False, indent=2)
+
+    task_context = _build_task_context(config=config)
+    with open(os.path.join(run_dir, "task_context.json"), "w", encoding="utf-8") as file:
+        json.dump(task_context, file, ensure_ascii=False, indent=2)
 
     data_cfg = config.get("data", {})
     fe_cfg = config.get("feature_engineering", {})
@@ -68,7 +74,8 @@ def run_pipeline(config: Dict) -> Dict:
             train_path=train_path,
             output_dir=iter_dir,
             iteration=iteration,
-            prev_diagnose_result=prev_diagnose_result
+            prev_diagnose_result=prev_diagnose_result,
+            task_context=task_context,
         )
 
         # 2. Hypothesis Generation
@@ -78,6 +85,7 @@ def run_pipeline(config: Dict) -> Dict:
             hypothesis_cfg=hypothesis_cfg, 
             profile_result=profile_result,
             output_dir=iter_dir,
+            task_context=task_context,
         )
 
         # 3. Implement
@@ -92,6 +100,7 @@ def run_pipeline(config: Dict) -> Dict:
             label_col=label_col,
             pipeline_config=config,
             external_feedback=None,
+            task_context=task_context,
         )
 
         # 4. Execute
@@ -128,6 +137,7 @@ def run_pipeline(config: Dict) -> Dict:
                     label_col=label_col,
                     pipeline_config=config,
                     external_feedback=implement_feedback,
+                    task_context=task_context,
                 )
             else:
                 break
@@ -143,6 +153,7 @@ def run_pipeline(config: Dict) -> Dict:
             output_dir=iter_dir,
             iteration=iteration,
             best_before_iteration=best_before_iteration,
+            task_context=task_context,
         )
         diagnose_results.append(diagnose_result)
         prev_diagnose_result = diagnose_result
@@ -203,6 +214,119 @@ def run_pipeline(config: Dict) -> Dict:
         "report_path": report_result.get("report_path"),
         "report_json_path": report_result.get("report_json_path"),
     }
+
+
+def _build_task_context(config: Dict[str, Any]) -> Dict[str, Any]:
+    fe_cfg = config.get("feature_engineering", {}) if isinstance(config, dict) else {}
+    root_task_cfg = config.get("task_description", {}) if isinstance(config, dict) else {}
+    fe_task_cfg = fe_cfg.get("task_description", {}) if isinstance(fe_cfg, dict) else {}
+
+    merged_cfg: Dict[str, Any] = {}
+    if isinstance(root_task_cfg, dict):
+        merged_cfg.update(root_task_cfg)
+    if isinstance(fe_task_cfg, dict):
+        merged_cfg.update(fe_task_cfg)
+
+    enabled = bool(merged_cfg.get("enabled", True))
+    if not enabled:
+        return {}
+
+    max_chars = int(merged_cfg.get("max_chars", 3000))
+    raw_text = str(merged_cfg.get("text", "") or "").strip()
+    source_path = str(merged_cfg.get("path", "") or "").strip()
+
+    if not raw_text and source_path:
+        path = Path(source_path)
+        if path.exists() and path.is_file():
+            raw_text = path.read_text(encoding="utf-8")
+        else:
+            print(f"[WARN] task_description.path not found: {path}")
+
+    raw_text = str(raw_text or "").strip()
+    if not raw_text:
+        return {}
+
+    if source_path:
+        print(f"[INFO] Loaded task description context from: {source_path}")
+
+    sections = _parse_sectioned_text(raw_text)
+    topic = sections.get("주제") or sections.get("topic") or ""
+    description = sections.get("설명") or sections.get("description") or ""
+    background = sections.get("배경") or sections.get("background") or ""
+
+    task_summary_source = description or topic or raw_text
+    task_summary = _truncate_text(task_summary_source, limit=max_chars)
+    metric_hint = _extract_metric_hint(raw_text)
+    evaluation_hint = _extract_evaluation_hint(description or raw_text)
+
+    background_brief = _truncate_text(background, limit=500) if background else ""
+
+    return {
+        "topic": _truncate_text(topic, limit=240),
+        "task_summary": task_summary,
+        "metric_hint": metric_hint,
+        "evaluation_hint": evaluation_hint,
+        "background_brief": background_brief,
+        "source_path": source_path,
+    }
+
+
+def _parse_sectioned_text(raw_text: str) -> Dict[str, str]:
+    text = str(raw_text or "")
+    header_pattern = re.compile(r"^\[([^\]]+)\]\s*$", re.MULTILINE)
+    matches = list(header_pattern.finditer(text))
+    if not matches:
+        return {"raw": text.strip()}
+
+    sections: Dict[str, str] = {}
+    for idx, match in enumerate(matches):
+        title = str(match.group(1)).strip()
+        start = match.end()
+        end = matches[idx + 1].start() if idx + 1 < len(matches) else len(text)
+        body = text[start:end].strip()
+        if body:
+            sections[title] = body
+    return sections
+
+
+def _extract_metric_hint(text: str) -> str:
+    candidates = [
+        r"Binary\s*F1(?:\s*Score)?",
+        r"\bF1(?:\s*Score)?\b",
+        r"ROC[\s\-]?AUC",
+        r"\bAUC\b",
+        r"\bRMSE\b",
+        r"\bMAE\b",
+        r"\bLogLoss\b",
+        r"\bAccuracy\b",
+    ]
+    for pattern in candidates:
+        match = re.search(pattern, text, flags=re.IGNORECASE)
+        if match:
+            return match.group(0)
+    return ""
+
+
+def _extract_evaluation_hint(text: str) -> str:
+    lines = [str(line).strip() for line in str(text or "").splitlines()]
+    selected: List[str] = []
+    for line in lines:
+        if not line:
+            continue
+        if any(key in line for key in ["평가", "Public", "Private", "리더보드", "Score", "코드 검증"]):
+            selected.append(line)
+        if len(selected) >= 8:
+            break
+    return " | ".join(selected)
+
+
+def _truncate_text(text: str, limit: int) -> str:
+    normalized = str(text or "").strip()
+    if limit <= 0:
+        return ""
+    if len(normalized) <= limit:
+        return normalized
+    return normalized[: limit - 3] + "..."
 
 
 def _build_implement_feedback(execute_result: Dict[str, Any]) -> Dict[str, Any]:

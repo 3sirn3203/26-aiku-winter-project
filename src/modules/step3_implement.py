@@ -14,9 +14,13 @@ from jinja2 import Template
 
 IMPLEMENT_E2E_SYSTEM_INSTRUCTION = """You complete TODO sections in a fixed Python skeleton for tabular ML.
 Return only executable Python code.
+Return the full final script, not a snippet.
 Do not include markdown fences.
 Do not include explanations.
-Do not remove CLI arguments or JSON output behavior."""
+Do not remove CLI arguments or JSON output behavior.
+The script must define `main()` and include:
+if __name__ == "__main__":
+    main()"""
 
 
 def implement(
@@ -29,6 +33,7 @@ def implement(
     label_col: Optional[str] = None,
     pipeline_config: Optional[Dict[str, Any]] = None,
     external_feedback: Optional[Dict[str, Any]] = None,
+    task_context: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     del train_path, label_col, pipeline_config
 
@@ -86,6 +91,7 @@ def implement(
         syntax_check=syntax_check,
         system_instruction=system_instruction,
         external_feedback=external_feedback,
+        task_context=task_context,
     )
 
     summary = {
@@ -102,6 +108,7 @@ def implement(
             "skeleton_path": str(skeleton_path),
             "system_instruction": system_instruction,
             "external_feedback": external_feedback,
+            "task_context": task_context,
             "profile_context_keys": list(profile_context.keys()),
             "generation": generation_meta,
         },
@@ -130,6 +137,7 @@ def _generate_pipeline_script(
     syntax_check: bool,
     system_instruction: str,
     external_feedback: Optional[Dict[str, Any]],
+    task_context: Optional[Dict[str, Any]],
 ) -> tuple[str, Dict[str, Any]]:
     stage_dir = output_script_path.parent
     last_raw_text = ""
@@ -144,6 +152,11 @@ def _generate_pipeline_script(
             profile_result_json=json.dumps(profile_context, ensure_ascii=False),
             preprocessing_hypotheses_json=json.dumps(preprocessing_hypotheses, ensure_ascii=False),
             feature_hypotheses_json=json.dumps(feature_hypotheses, ensure_ascii=False),
+            task_context_json=(
+                json.dumps(task_context, ensure_ascii=False)
+                if isinstance(task_context, dict) and task_context
+                else "null"
+            ),
             generation_feedback_json=json.dumps(feedback, ensure_ascii=False) if feedback is not None else "null",
             external_feedback_json=json.dumps(external_feedback, ensure_ascii=False) if external_feedback is not None else "null",
         )

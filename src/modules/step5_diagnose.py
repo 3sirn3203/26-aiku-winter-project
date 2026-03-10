@@ -42,6 +42,7 @@ def diagnose(
     output_dir: str,
     iteration: int,
     best_before_iteration: Optional[Dict[str, Any]] = None,
+    task_context: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     diagnose_dir = os.path.join(output_dir, "diagnose")
     os.makedirs(diagnose_dir, exist_ok=True)
@@ -89,6 +90,7 @@ def diagnose(
 
     prompt_context = {
         "iteration": iteration,
+        "task_context": task_context if isinstance(task_context, dict) else {},
         "execution_status": {
             "success": success,
             "hard_failure": hard_failure,
@@ -170,7 +172,14 @@ def _run_diagnose_llm(
     if not prompt_path.exists():
         raise FileNotFoundError(f"Prompt template not found: {prompt_path}")
     template = Template(prompt_path.read_text(encoding="utf-8"))
-    prompt = template.render(context_json=json.dumps(prompt_context, ensure_ascii=False))
+    prompt = template.render(
+        context_json=json.dumps(prompt_context, ensure_ascii=False),
+        task_context_json=(
+            json.dumps(prompt_context.get("task_context"), ensure_ascii=False)
+            if isinstance(prompt_context.get("task_context"), dict) and prompt_context.get("task_context")
+            else "null"
+        ),
+    )
 
     model = str(diagnose_cfg.get("model", "gemini-2.5-flash"))
     temperature = float(diagnose_cfg.get("temperature", 0.2))

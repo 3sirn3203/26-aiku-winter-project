@@ -42,6 +42,9 @@ Return schema:
   ]
 }
 
+Task context JSON (nullable):
+{task_context_json}
+
 Profile context JSON:
 {profile_context_json}
 """
@@ -69,6 +72,7 @@ def generate_hypotheses(
     hypothesis_cfg: Dict[str, Any],
     profile_result: Dict[str, Any],
     output_dir: str,
+    task_context: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     hypothesis_dir = os.path.join(output_dir, "hypothesis")
     os.makedirs(hypothesis_dir, exist_ok=True)
@@ -82,12 +86,18 @@ def generate_hypotheses(
         hypothesis_cfg=hypothesis_cfg,
         profile_result=profile_result,
         hypothesis_dir=hypothesis_dir,
+        task_context=task_context,
     )
 
     prompt_template = Template(prompt_path.read_text(encoding="utf-8"))
     prompt = prompt_template.render(
         profile_result_json=json.dumps(profile_result, ensure_ascii=False),
         web_research_json=json.dumps(web_research.get("context"), ensure_ascii=False),
+        task_context_json=(
+            json.dumps(task_context, ensure_ascii=False)
+            if isinstance(task_context, dict) and task_context
+            else "null"
+        ),
     )
 
     model = str(hypothesis_cfg.get("model", "gemini-2.5-flash"))
@@ -174,6 +184,7 @@ def generate_hypotheses(
                     "status": web_research.get("status", "disabled"),
                     "error": web_research.get("error", ""),
                 },
+                "task_context": task_context,
             },
             file,
             ensure_ascii=False,
@@ -223,6 +234,7 @@ def _run_hypothesis_web_research(
     hypothesis_cfg: Dict[str, Any],
     profile_result: Dict[str, Any],
     hypothesis_dir: str,
+    task_context: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     web_cfg = hypothesis_cfg.get("web_search", {}) if isinstance(hypothesis_cfg, dict) else {}
     enabled = bool(web_cfg.get("enabled", False))
@@ -268,6 +280,9 @@ def _run_hypothesis_web_research(
     prompt = HYPOTHESIS_WEB_RESEARCH_PROMPT.replace(
         "{profile_context_json}",
         json.dumps(profile_context, ensure_ascii=False),
+    ).replace(
+        "{task_context_json}",
+        json.dumps(task_context, ensure_ascii=False) if isinstance(task_context, dict) and task_context else "null",
     )
 
     last_raw_text = ""
@@ -338,6 +353,7 @@ def _run_hypothesis_web_research(
                 "max_attempts": max_attempts,
                 "system_instruction": system_instruction,
                 "prompt_context": profile_context,
+                "task_context": task_context,
                 "raw_text": last_raw_text,
                 "last_error": last_error,
             },

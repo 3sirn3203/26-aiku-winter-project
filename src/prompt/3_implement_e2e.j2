@@ -7,8 +7,14 @@ Task:
 
 Rules:
 - Return only executable Python code.
+- Return the full final script, not a snippet/patch/diff.
 - No markdown fences.
 - Do not remove required imports, argument parsing, or `main()`.
+- Must include `def main() -> None:`.
+- Must include final entrypoint guard:
+  `if __name__ == "__main__":`
+  `    main()`
+- Keep the existing CLI and output JSON behavior from the skeleton unchanged.
 - Do not add file/network dependencies outside existing project modules.
 - Handle missing values robustly.
 - Keep train/valid schema alignment stable.
@@ -17,6 +23,9 @@ Rules:
 
 Profile context JSON:
 {{ profile_result_json }}
+
+Task context JSON (nullable):
+{{ task_context_json }}
 
 Preprocessing hypotheses:
 {{ preprocessing_hypotheses_json }}

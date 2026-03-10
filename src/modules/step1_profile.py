@@ -19,7 +19,10 @@ Always return only executable Python code.
 Never return JSON wrappers.
 Never include markdown fences.
 Never include explanations or comments outside the code.
-The output must be a single complete Python script."""
+The output must be a single complete Python script.
+The script must define `main()` and call it with:
+if __name__ == "__main__":
+    main()"""
 
 PROFILE_INSIGHT_SYSTEM_INSTRUCTION = """You are a tabular profiling insight analyst.
 Return only a valid JSON object matching the schema.
@@ -41,6 +44,7 @@ def profiling(
     output_dir: str,
     iteration: int,
     prev_diagnose_result: Optional[Dict[str, Any]] = None,
+    task_context: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     profile_dir = os.path.join(output_dir, "profile")
     os.makedirs(profile_dir, exist_ok=True)
@@ -51,6 +55,7 @@ def profiling(
         prev_diagnose_result=prev_diagnose_result,
         profile_cfg=profile_cfg,
     )
+    task_context_json = json.dumps(task_context, ensure_ascii=False) if isinstance(task_context, dict) and task_context else "null"
 
     model = str(profile_cfg.get("model", "gemini-2.5-flash"))
     temperature = float(profile_cfg.get("temperature", 0.3))
@@ -86,6 +91,7 @@ def profiling(
         train_path=train_path,
         prompt_payload={
             "dataset_context": json.dumps(dataset_context, ensure_ascii=False),
+            "task_context_json": task_context_json,
             "previous_diagnose_json": (
                 json.dumps(diagnose_prompt_context, ensure_ascii=False)
                 if diagnose_prompt_context is not None
@@ -105,6 +111,7 @@ def profiling(
         os.path.join(profile_dir, "profile_basic_prompt_context.json"),
         {
             "dataset_context": dataset_context,
+            "task_context": task_context,
             "basic_profile_stdout_preview": basic_stdout_for_prompt,
         },
     )
@@ -117,6 +124,7 @@ def profiling(
         train_path=train_path,
         prompt_payload={
             "dataset_context": json.dumps(dataset_context, ensure_ascii=False),
+            "task_context_json": task_context_json,
             "basic_profile_stdout": basic_stdout_for_prompt,
             "previous_diagnose_json": (
                 json.dumps(diagnose_prompt_context, ensure_ascii=False)
@@ -140,6 +148,7 @@ def profiling(
         os.path.join(profile_dir, "profile_correlation_prompt_context.json"),
         {
             "dataset_context": dataset_context,
+            "task_context": task_context,
             "basic_profile_stdout_preview": basic_stdout_for_prompt,
             "correlation_profile_stdout_preview": correlation_stdout_for_prompt,
         },
@@ -151,6 +160,7 @@ def profiling(
         profile_dir=profile_dir,
         prompt_payload={
             "dataset_context": json.dumps(dataset_context, ensure_ascii=False),
+            "task_context_json": task_context_json,
             "basic_profile_stdout": basic_stdout_for_prompt,
             "correlation_profile_stdout": correlation_stdout_for_prompt,
             "previous_diagnose_json": (
@@ -240,6 +250,7 @@ def profiling(
                     "last_error": insight_stage["last_error"],
                 },
                 "diagnose_prompt_context": diagnose_prompt_context,
+                "task_context": task_context,
                 "basic_stdout_preview": basic_stdout_for_prompt,
                 "correlation_stdout_preview": correlation_stdout_for_prompt,
             },

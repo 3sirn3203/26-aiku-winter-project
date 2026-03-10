@@ -14,6 +14,10 @@ Execution loop:
 Code requirements:
 - Return only executable Python code.
 - Must be a complete script.
+- Must define `def main() -> None:` and place core logic inside `main()`.
+- Must include entrypoint guard at end:
+  `if __name__ == "__main__":`
+  `    main()`
 - Must parse argument:
   --train-path
 - Must load CSV from --train-path with pandas.
@@ -31,6 +35,9 @@ Recommended stdout sections:
 
 Dataset context:
 {{ dataset_context }}
+
+Task context JSON (nullable):
+{{ task_context_json }}
 
 Basic profiling stdout from previous stage:
 {{ basic_profile_stdout }}

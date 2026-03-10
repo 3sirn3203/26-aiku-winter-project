@@ -1,4 +1,9 @@
 {
+    "task_description": {
+        "enabled": true,
+        "path": "data/dacon/task_description.txt",
+        "max_chars": 2500
+    },
     "data": {
         "train_path": "data/dacon/train.csv",
         "test_path": "data/dacon/test.csv",
