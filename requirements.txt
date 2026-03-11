@@ -8,3 +8,6 @@ google-genai
 jinja2
 pydantic
 pydantic-settings
+category-encoders
+autogluon
+fastai
