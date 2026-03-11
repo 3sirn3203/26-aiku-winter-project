@@ -83,6 +83,12 @@ def run_pipeline(config: Dict) -> Dict:
         execute_appended = False
 
         keep_reference_objective = previous_success_objective
+        selected_prior_block_paths = _merge_unique_paths(
+            [str(item.get("path", "")).strip() for item in kept_feature_blocks],
+            [],
+        )
+        current_feature_block_paths: List[str] = []
+        execute_feature_block_paths: List[str] = list(selected_prior_block_paths)
         kept_block_added_count = 0
         kept_blocks_this_iteration = False
         keep_decision_reason = "iteration_not_completed"
@@ -129,9 +135,19 @@ def run_pipeline(config: Dict) -> Dict:
             fallback_count = 0
 
             for attempt in range(max_fallbacks + 1):
+                current_feature_block_paths = _normalize_path_list(
+                    implement_result.get("feature_block_module_paths")
+                )
+                execute_feature_block_paths = _merge_unique_paths(
+                    selected_prior_block_paths,
+                    current_feature_block_paths,
+                )
+                execute_implement_result = dict(implement_result)
+                execute_implement_result["feature_block_module_paths"] = execute_feature_block_paths
+                execute_implement_result["selected_prior_feature_block_paths"] = selected_prior_block_paths
                 execute_result = execute(
                     execute_cfg=execute_cfg_for_iter,
-                    implement_result=implement_result,
+                    implement_result=execute_implement_result,
                     iteration_dir=iter_dir,
                 )
                 execute_attempts.append(execute_result)
@@ -179,8 +195,7 @@ def run_pipeline(config: Dict) -> Dict:
 
             if execute_result.get("success", False):
                 if objective_value > keep_reference_objective:
-                    resolved_blocks = _normalize_path_list(implement_result.get("feature_block_module_paths"))
-                    for block_path in resolved_blocks:
+                    for block_path in current_feature_block_paths:
                         if any(item.get("path") == block_path for item in kept_feature_blocks):
                             continue
                         kept_feature_blocks.append(
@@ -231,6 +246,9 @@ def run_pipeline(config: Dict) -> Dict:
                     "selection_kept_block_added_count": kept_block_added_count,
                     "selection_keep_decision_reason": keep_decision_reason,
                     "selection_total_kept_block_count": len(kept_feature_blocks),
+                    "execute_selected_prior_block_count": len(selected_prior_block_paths),
+                    "execute_current_iteration_block_count": len(current_feature_block_paths),
+                    "execute_total_block_count": len(execute_feature_block_paths),
                 }
             )
             if execute_result.get("success", False):
@@ -297,6 +315,9 @@ def run_pipeline(config: Dict) -> Dict:
                     "selection_kept_block_added_count": 0,
                     "selection_keep_decision_reason": "iteration_exception",
                     "selection_total_kept_block_count": len(kept_feature_blocks),
+                    "execute_selected_prior_block_count": len(selected_prior_block_paths),
+                    "execute_current_iteration_block_count": len(current_feature_block_paths),
+                    "execute_total_block_count": len(execute_feature_block_paths),
                 }
             )
 
@@ -510,6 +531,18 @@ def _normalize_path_list(value: Any) -> List[str]:
         if text:
             out.append(text)
     return out
+
+
+def _merge_unique_paths(left: List[str], right: List[str]) -> List[str]:
+    merged: List[str] = []
+    seen: set[str] = set()
+    for raw in list(left) + list(right):
+        text = str(raw or "").strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        merged.append(text)
+    return merged
 
 
 def _safe_float(value: Any, default: float) -> float:
