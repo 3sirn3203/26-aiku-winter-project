@@ -1,98 +1,104 @@
-# 26-Winter Project: LLM 기반 Tabular Feature Engineering
+# 데이터 분석 agent 만들어서 공모전 Ssalmuck하기
 
-![프로젝트 워크플로우](assets/figure.png)
+📢 2026년 겨울학기 [AIKU](https://github.com/AIKU-Official) 활동으로 진행한 프로젝트입니다
 
 ## 소개
-이 프로젝트는 LLM이 tabular 데이터의 전처리/피처 엔지니어링 코드를 반복적으로 개선하고, CV 결과를 기반으로 다음 시도를 자동으로 조정하는 실험 파이프라인입니다.
 
-핵심 특징:
-- Iteration 기반 자동 개선 루프 (Profile -> Hypothesis -> Implement -> Execute -> Diagnose)
-- 3단계에서 E2E 스켈레톤 코드의 TODO를 LLM이 완성
-- 4단계에서 생성된 `implement_pipeline.py`를 직접 실행해 성능 검증
-- 실행 산출물(`runs/<run_id>/...`) 자동 저장 및 HTML/JSON 리포트 생성
+(프로젝트를 소개해주세요)
 
 ## 방법론
-파이프라인은 iteration마다 아래 단계를 수행합니다.
 
-1. `Step 1: Profiling`  
-   - 데이터 기초 통계/상관 특성/리스크를 분석해 프로파일 컨텍스트를 생성합니다.
-
-2. `Step 2: Hypothesis`  
-   - 프로파일 결과(선택적으로 웹 리서치 포함)를 바탕으로 전처리/피처 가설을 생성합니다.
-
-3. `Step 3: Implement`  
-   - 고정된 E2E 스켈레톤(`src/prompt/3_implement_e2e_skeleton.py`)을 프롬프트에 포함해,
-     TODO 구간만 가설에 맞게 채운 전체 실행 스크립트(`implement_pipeline.py`)를 생성합니다.
-   - 문법 체크 실패 시 재시도합니다.
-
-4. `Step 4: Execute`  
-   - 생성된 `implement_pipeline.py`를 실행해 교차검증을 수행합니다.
-   - `mean_cv`, `std_cv`, `metric`, `objective_mean`를 포함한 결과 JSON을 저장합니다.
-
-5. `Step 5: Diagnose`  
-   - 실행 결과/로그를 분석해 실패 원인 및 다음 iteration 개선 피드백을 생성합니다.
-
-6. `Final Report`  
-   - 전체 iteration 결과를 취합해 `report.html`, `report.json`을 만듭니다.
+(문제를 정의하고 이를 해결한 방법을 가독성 있게 설명해주세요)
 
 ## 환경 설정
-1. Python 가상환경 생성/활성화
+
+1. Python 가상환경 생성 및 의존성 설치
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-```
-
-2. 패키지 설치
-
-```bash
+python -m pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-3. API Key 설정
+2. 환경변수 설정 (`GEMINI_API_KEY`)
 
 ```bash
 cp .env.example .env
 ```
 
-`.env` 파일에 아래 값을 설정합니다.
+`.env`에 아래 값을 설정합니다.
 
 ```bash
 GEMINI_API_KEY=YOUR_API_KEY
 ```
 
+3. 데이터/설정 파일 확인
+- Dacon: `config/dacon.json`, `data/dacon/*`
+- Kaggle: `config/kaggle.json`, `data/kaggle/*`
+
 ## 사용 방법
-### 1) 파이프라인 실행
+
+1. 전체 파이프라인 실행 + submission 생성
 
 ```bash
-python3 main.py --config config/dacon.json
+# 기본: config/dacon.json
+./scripts.sh
+
+# Kaggle 설정
+./scripts.sh config/kaggle.json
 ```
 
-다른 데이터셋 설정 예시:
+2. 파이프라인을 생성한 후 특정 run으로 submission 생성
 
 ```bash
-python3 main.py --config config/kaggle.json
+python -m main --config config/dacon.json
+python -m main --config config/kaggle.json
 ```
-
-실행 후 산출물:
-- `runs/<run_id>/config.json`
-- `runs/<run_id>/iteration_<n>/profile/`
-- `runs/<run_id>/iteration_<n>/hypothesis/`
-- `runs/<run_id>/iteration_<n>/implement/implement_pipeline.py`
-- `runs/<run_id>/iteration_<n>/execute/cv_result.json`
-- `runs/<run_id>/iteration_<n>/diagnose/`
-- `runs/<run_id>/report.html`, `runs/<run_id>/report.json`
-
-### 2) 제출 파일 생성
 
 ```bash
-python3 submission.py --config config/dacon.json --run_id <RUN_ID> --iteration <ITER>
+# best iteration 자동 선택(기본)
+python -m submission --config config/kaggle.json --run_id <RUN_ID>
+
+# iteration 수동 지정
+python -m submission --config config/kaggle.json --run_id <RUN_ID> --iteration <ITERATION>
 ```
 
-동작 방식:
-- 기본적으로 해당 iteration의 `implement_pipeline.py`를 사용합니다.
-- 필요 시 직접 스크립트 지정 가능:
+결과 파일은 기본적으로 `submissions/*/submission_<RUN_ID>_iter_<ITERATION>.csv` 형식으로 저장됩니다.
 
-```bash
-python3 submission.py --config config/dacon.json --run_id <RUN_ID> --iteration <ITER> --pipeline_script_path runs/<RUN_ID>/iteration_<ITER>/implement/implement_pipeline.py
-```
+## 예시 결과
+
+(사용 방법을 실행했을 때 나타나는 결과나 시각화 이미지를 보여주세요)
+
+## 팀원
+
+<table>
+  <tr>
+    <td align="center" valign="top">
+      <img src="https://github.com/3sirn3203.png?size=200" width="120" alt="김우진" /><br/>
+      <b>김우진</b><br/>
+      <a href="https://github.com/3sirn3203">@3sirn3203</a><br/>
+      팀장
+    </td>
+    <td align="center" valign="top">
+      <img src="https://github.com/JuHyeon1222.png?size=200" width="120" alt="박주현" /><br/>
+      <b>박주현</b><br/>
+      <a href="https://github.com/JuHyeon1222">@JuHyeon1222</a>
+    </td>
+    <td align="center" valign="top">
+      <img src="https://github.com/tigris-ignea.png?size=200" width="120" alt="박서연" /><br/>
+      <b>박서연</b><br/>
+      <a href="https://github.com/tigris-ignea">@tigris-ignea</a>
+    </td>
+    <td align="center" valign="top">
+      <img src="https://github.com/hansimboy.png?size=200" width="120" alt="장국영" /><br/>
+      <b>장국영</b><br/>
+      <a href="https://github.com/hansimboy">@hansimboy</a>
+    </td>
+    <td align="center" valign="top">
+      <img src="https://github.com/studipu.png?size=200" width="120" alt="백승우" /><br/>
+      <b>백승우</b><br/>
+      <a href="https://github.com/studipu">@studipu</a>
+    </td>
+  </tr>
+</table>
