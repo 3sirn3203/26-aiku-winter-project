@@ -139,13 +139,29 @@ import re
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
+import numpy as np
 import pandas as pd
+from sklearn.compose import ColumnTransformer
+from sklearn.impute import SimpleImputer
+from sklearn.preprocessing import OneHotEncoder
+
+try:
+    from category_encoders import TargetEncoder
+except Exception:  # noqa: BLE001
+    TargetEncoder = None
 
 from src.modules.validator import run_cross_validation
 
 PREPROCESSOR_MODULE_PATH = __PREPROCESSOR_PATH__
 FEATURE_BLOCK_MODULE_PATHS = __FEATURE_BLOCK_PATHS__
 SAFE_FEATURE_NAME_PATTERN = re.compile(r"^[A-Za-z0-9_]+$")
+COMMON_SYMBOLS = {
+    "np": np,
+    "ColumnTransformer": ColumnTransformer,
+    "SimpleImputer": SimpleImputer,
+    "OneHotEncoder": OneHotEncoder,
+    "TargetEncoder": TargetEncoder,
+}
 
 
 def _safe_name(name: Any) -> str:
@@ -190,6 +206,9 @@ def _load_module_from_path(path: str, module_name: str) -> Any:
         raise ImportError(f"Could not load module spec: {module_path}")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
+    for symbol_name, symbol_value in COMMON_SYMBOLS.items():
+        if symbol_name not in module.__dict__ and symbol_value is not None:
+            module.__dict__[symbol_name] = symbol_value
     return module
 
 

@@ -22,7 +22,17 @@ Do not include markdown fences or explanations."""
 
 MODULE_HEADER = """from __future__ import annotations
 from typing import Any, Dict
+
+import numpy as np
 import pandas as pd
+from sklearn.compose import ColumnTransformer
+from sklearn.impute import SimpleImputer
+from sklearn.preprocessing import OneHotEncoder
+
+try:
+    from category_encoders import TargetEncoder
+except Exception:  # noqa: BLE001
+    TargetEncoder = None
 
 """
 
