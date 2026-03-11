@@ -297,23 +297,33 @@ def _build_model(
 
             if task_type == "classification":
                 defaults = {
-                    "n_estimators": 400,
-                    "learning_rate": 0.05,
+                    "n_estimators": 250,
+                    "learning_rate": 0.03,
                     "num_leaves": 31,
-                    "subsample": 0.9,
-                    "colsample_bytree": 0.9,
+                    "min_child_samples": 10,
+                    "subsample": 0.8,
+                    "subsample_freq": 1,
+                    "colsample_bytree": 0.8,
+                    "reg_lambda": 1.0,
                     "random_state": random_state,
+                    "n_jobs": -1,
+                    "verbosity": -1,
                 }
                 defaults.update(params)
                 return lgb.LGBMClassifier(**defaults), "lightgbm"
 
             defaults = {
-                "n_estimators": 400,
-                "learning_rate": 0.05,
+                "n_estimators": 250,
+                "learning_rate": 0.03,
                 "num_leaves": 31,
-                "subsample": 0.9,
-                "colsample_bytree": 0.9,
+                "min_child_samples": 10,
+                "subsample": 0.8,
+                "subsample_freq": 1,
+                "colsample_bytree": 0.8,
+                "reg_lambda": 1.0,
                 "random_state": random_state,
+                "n_jobs": -1,
+                "verbosity": -1,
             }
             defaults.update(params)
             return lgb.LGBMRegressor(**defaults), "lightgbm"

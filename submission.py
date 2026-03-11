@@ -1,8 +1,20 @@
+# 실행 방법:
+# 1) 기본 실행 (final_selection 우선 사용, 없으면 run의 best iteration 자동 선택)
+#    python -m submission --config config/dacon.json --run_id <RUN_ID>
+#
+# 2) iteration 수동 지정
+#    python -m submission --config config/dacon.json --run_id <RUN_ID> --iteration <ITERATION>
+#
+# 3) 출력 경로 지정
+#    python -m submission --config config/dacon.json --run_id <RUN_ID> --output_path submissions/dacon/submission_<RUN_ID>_iter_<ITERATION>.csv
+
 import importlib.util
 import inspect
 import json
 import os
 import re
+import shutil
+import tempfile
 from argparse import ArgumentParser
 from pathlib import Path
 from types import ModuleType
@@ -345,8 +357,301 @@ def resolve_pipeline_script_path(
     return str(impl_dir / "implement_pipeline.py"), False
 
 
+def resolve_generated_module_bundle(
+    run_id: str,
+    iteration: int,
+    submission_cfg: Dict[str, Any],
+) -> Tuple[Optional[str], List[str], str]:
+    impl_dir = Path("runs") / run_id / f"iteration_{iteration}" / "implement"
+
+    # Optional explicit overrides from submission config (if user sets them).
+    configured_pre = submission_cfg.get("preprocessor_module_path")
+    configured_blocks = submission_cfg.get("feature_block_module_paths")
+    if configured_pre:
+        pre_path = _resolve_relative_path(str(configured_pre), impl_dir)
+        block_paths: List[str] = []
+        if isinstance(configured_blocks, list):
+            for item in configured_blocks:
+                text = str(item or "").strip()
+                if text:
+                    block_paths.append(_resolve_relative_path(text, impl_dir))
+        return pre_path, block_paths, "submission_cfg"
+
+    summary_path = impl_dir / "implement_summary.json"
+    if not summary_path.exists():
+        return None, [], f"summary_not_found:{summary_path}"
+
+    try:
+        summary = read_json(str(summary_path))
+    except Exception as exc:  # noqa: BLE001
+        return None, [], f"summary_parse_failed:{summary_path}:{exc}"
+
+    pre_raw = str(summary.get("preprocessor_module_path", "")).strip()
+    if not pre_raw:
+        return None, [], f"module_bundle_not_declared:{summary_path}"
+
+    pre_path = _resolve_relative_path(pre_raw, impl_dir)
+    block_paths: List[str] = []
+    raw_blocks = summary.get("feature_block_module_paths")
+    if isinstance(raw_blocks, list):
+        for item in raw_blocks:
+            text = str(item or "").strip()
+            if text:
+                block_paths.append(_resolve_relative_path(text, impl_dir))
+
+    return pre_path, block_paths, f"implement_summary:{summary_path}"
+
+
+def resolve_final_selection_bundle(
+    run_id: str,
+    submission_cfg: Dict[str, Any],
+) -> Tuple[Optional[str], List[str], str]:
+    run_dir = Path("runs") / str(run_id).strip()
+    configured_path = str(submission_cfg.get("final_selection_path", "") or "").strip()
+
+    candidate_paths: List[Path] = []
+    if configured_path:
+        candidate_paths.append(Path(configured_path))
+    candidate_paths.append(run_dir / "final" / "final_selection.json")
+
+    seen: set[str] = set()
+    for candidate in candidate_paths:
+        key = str(candidate)
+        if key in seen:
+            continue
+        seen.add(key)
+
+        if not candidate.exists():
+            continue
+
+        try:
+            payload = read_json(str(candidate))
+        except Exception as exc:  # noqa: BLE001
+            return None, [], f"final_selection_parse_failed:{candidate}:{exc}"
+
+        pre_raw = str(payload.get("selected_preprocessor_module_path", "") or "").strip()
+        if not pre_raw:
+            best_pre = payload.get("best_preprocessor", {})
+            if isinstance(best_pre, dict):
+                pre_raw = str(best_pre.get("path", "") or "").strip()
+        if not pre_raw:
+            return None, [], f"final_selection_missing_preprocessor:{candidate}"
+
+        block_paths: List[str] = []
+        raw_blocks = payload.get("selected_feature_block_module_paths")
+        if isinstance(raw_blocks, list):
+            for item in raw_blocks:
+                text = str(item or "").strip()
+                if text:
+                    block_paths.append(_resolve_relative_path(text, candidate.parent))
+
+        pre_path = _resolve_relative_path(pre_raw, candidate.parent)
+        return pre_path, block_paths, f"final_selection:{candidate}"
+
+    return None, [], f"final_selection_not_found:{run_dir}"
+
+
+def _load_generated_preprocessor_module(preprocessor_module_path: str) -> Any:
+    module = load_module_from_path(
+        preprocessor_module_path,
+        "submission_generated_preprocessor_module",
+    )
+    candidate = getattr(module, "GeneratedPreprocessor", None)
+    obj = candidate() if inspect.isclass(candidate) else candidate
+    if obj is None:
+        obj = module
+    assert_module_functions(obj, ["fit_preprocessor", "transform_preprocessor"], "generated_preprocessor_module")
+    return obj
+
+
+def _load_generated_feature_block_module(feature_block_module_path: str, index: int) -> Any:
+    module = load_module_from_path(
+        feature_block_module_path,
+        f"submission_generated_feature_block_module_{index}",
+    )
+    class_name = f"GeneratedFeatureBlock{index}"
+    candidate = getattr(module, class_name, None)
+    if candidate is None:
+        for value in module.__dict__.values():
+            if inspect.isclass(value) and hasattr(value, "fit") and hasattr(value, "transform"):
+                candidate = value
+                break
+    obj = candidate() if inspect.isclass(candidate) else candidate
+    if obj is None:
+        raise ValueError(
+            f"Feature block class not found: index={index}, path={feature_block_module_path}"
+        )
+    assert_module_functions(obj, ["fit", "transform"], f"generated_feature_block_{index}")
+    return obj
+
+
+class SubmissionComposedFeatureEngineering:
+    def __init__(self, blocks: List[Any]) -> None:
+        self._blocks = list(blocks)
+        self.FEATURE_BLOCKS = {
+            "generated": {
+                "description": "One generated feature per hypothesis block",
+                "enabled_by_default": True,
+                "count": len(self._blocks),
+            }
+        }
+
+    def fit_feature_engineering(
+        self,
+        train_df: pd.DataFrame,
+        label_col: str,
+        config: Dict[str, Any],
+        enabled_blocks: Optional[Iterable[str]] = None,
+    ) -> Dict[str, Any]:
+        del enabled_blocks
+        train_in = ensure_dataframe(train_df)
+        block_states: List[Dict[str, Any]] = []
+        for idx, block in enumerate(self._blocks, start=1):
+            default_name = f"generated_feature_{idx}"
+            try:
+                state = block.fit(train_df=train_in.copy(), label_col=label_col, config=config)
+            except Exception as exc:  # noqa: BLE001
+                state = {"fit_error": str(exc)}
+            if not isinstance(state, dict):
+                state = {"fit_return_type": type(state).__name__}
+            raw_name = state.get("feature_name")
+            if raw_name is None and hasattr(block, "FEATURE_NAME"):
+                raw_name = getattr(block, "FEATURE_NAME")
+            safe_name = sanitize_feature_name(raw_name) if raw_name is not None else ""
+            safe_name = safe_name.strip("_")
+            if not safe_name:
+                safe_name = default_name
+            state["feature_name"] = safe_name
+            state["_block_index"] = idx
+            state["_block_class"] = block.__class__.__name__
+            block_states.append(state)
+        return {"block_states": block_states, "feature_cols": []}
+
+    def transform_feature_engineering(self, df: pd.DataFrame, fe_state: Dict[str, Any], config: Dict[str, Any]) -> pd.DataFrame:
+        df_in = ensure_dataframe(df)
+        label_col = ""
+        if isinstance(config, dict):
+            data_cfg = config.get("data", {})
+            if isinstance(data_cfg, dict):
+                label_col = str(data_cfg.get("label_col", "") or "")
+        base_df = df_in.drop(columns=[label_col], errors="ignore") if label_col else df_in.copy()
+        out_df = base_df.copy()
+
+        states = fe_state.get("block_states", []) if isinstance(fe_state, dict) else []
+        for idx, block in enumerate(self._blocks, start=1):
+            state = {}
+            if idx - 1 < len(states) and isinstance(states[idx - 1], dict):
+                state = states[idx - 1]
+            default_name = f"generated_feature_{idx}"
+            feature_name = str(state.get("feature_name", default_name))
+            feature_name = sanitize_feature_name(feature_name).strip("_") or default_name
+            try:
+                raw_feature = block.transform(
+                    df=df_in.copy(),
+                    block_state=state,
+                    label_col=label_col,
+                    config=config,
+                )
+            except Exception:
+                raw_feature = pd.Series([0.0] * len(df_in), index=df_in.index, name=feature_name)
+
+            feature_series = self._coerce_single_feature(
+                raw=raw_feature,
+                index=df_in.index,
+                feature_name=feature_name,
+            )
+            out_df[feature_name] = pd.to_numeric(feature_series, errors="coerce").fillna(0.0).to_numpy()
+
+        out_df.columns = _dedupe_names_runtime(out_df.columns.tolist())
+        if isinstance(fe_state, dict):
+            fe_state["feature_cols"] = list(out_df.columns)
+        return out_df
+
+    def feature_registry_from_state(self, fe_state: Dict[str, Any]) -> List[Dict[str, Any]]:
+        cols = [str(col) for col in fe_state.get("feature_cols", [])] if isinstance(fe_state, dict) else []
+        generated_set = set()
+        if isinstance(fe_state, dict):
+            for item in fe_state.get("block_states", []):
+                if isinstance(item, dict):
+                    name = str(item.get("feature_name", "")).strip()
+                    if name:
+                        generated_set.add(name)
+        out: List[Dict[str, Any]] = []
+        for col in cols:
+            block = "generated" if col in generated_set else "base"
+            out.append({"feature": col, "block": block})
+        return out
+
+    @staticmethod
+    def _coerce_single_feature(raw: Any, index: pd.Index, feature_name: str) -> pd.Series:
+        if isinstance(raw, pd.DataFrame):
+            if raw.shape[1] == 0:
+                series = pd.Series([0.0] * len(index), index=index)
+            else:
+                series = raw.iloc[:, 0]
+        elif isinstance(raw, pd.Series):
+            series = raw
+        else:
+            try:
+                series = pd.Series(raw)
+            except Exception:
+                series = pd.Series([0.0] * len(index))
+
+        series = series.reset_index(drop=True)
+        if len(series) < len(index):
+            series = series.reindex(range(len(index)))
+        if len(series) > len(index):
+            series = series.iloc[: len(index)]
+        series.index = index
+        series.name = feature_name
+        return series
+
+
+def _dedupe_names_runtime(names: Iterable[Any]) -> List[str]:
+    out: List[str] = []
+    seen: Dict[str, int] = {}
+    for idx, raw in enumerate(names):
+        base = sanitize_feature_name(str(raw)).strip("_")
+        if not base:
+            base = f"feature_{idx}"
+        if base not in seen:
+            seen[base] = 0
+            out.append(base)
+        else:
+            seen[base] += 1
+            out.append(f"{base}_{seen[base]}")
+    return out
+
+
+def load_modules_from_module_bundle(
+    preprocessor_module_path: str,
+    feature_block_module_paths: List[str],
+) -> Tuple[Any, Any]:
+    preprocessor_obj = _load_generated_preprocessor_module(preprocessor_module_path)
+    blocks = [
+        _load_generated_feature_block_module(path, index)
+        for index, path in enumerate(feature_block_module_paths, start=1)
+    ]
+    feature_obj = SubmissionComposedFeatureEngineering(blocks)
+    assert_module_functions(feature_obj, ["fit_feature_engineering", "transform_feature_engineering"], "composed_feature_engineering")
+    return preprocessor_obj, feature_obj
+
+
 def load_modules_from_pipeline_script(pipeline_script_path: str) -> Tuple[Any, Any]:
     module = load_module_from_path(pipeline_script_path, "submission_generated_pipeline_module")
+
+    # Support assembled execute script layout:
+    # PREPROCESSOR_MODULE_PATH + FEATURE_BLOCK_MODULE_PATHS.
+    pre_path = str(getattr(module, "PREPROCESSOR_MODULE_PATH", "") or "").strip()
+    raw_blocks = getattr(module, "FEATURE_BLOCK_MODULE_PATHS", None)
+    if pre_path:
+        block_paths: List[str] = []
+        if isinstance(raw_blocks, list):
+            block_paths = [str(item).strip() for item in raw_blocks if str(item).strip()]
+        return load_modules_from_module_bundle(
+            preprocessor_module_path=pre_path,
+            feature_block_module_paths=block_paths,
+        )
 
     preprocessor_obj: Any = None
     if hasattr(module, "GeneratedPreprocessor"):
@@ -486,19 +791,15 @@ def main() -> None:
     )
     id_col = str(submission_data_cfg.get("id_col", "ID"))
 
-    output_path = args.output_path or submission_data_cfg.get("output_path") or submission_cfg.get("output_path")
-    if not output_path:
-        output_path = "submissions/dacon/submission.csv"
-    output_path = str(output_path)
+    configured_output_path = submission_data_cfg.get("output_path") or submission_cfg.get("output_path")
+    default_output_dir = "submissions/dacon"
+    if configured_output_path:
+        candidate_dir = os.path.dirname(str(configured_output_path))
+        if candidate_dir:
+            default_output_dir = candidate_dir
+    default_output_name = f"submission_{run_id}_iter_{iteration}.csv"
+    output_path = str(args.output_path or os.path.join(default_output_dir, default_output_name))
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
-
-    model_path = submission_cfg.get("model_path")
-    if not model_path:
-        model_path = os.path.join(os.path.dirname(output_path) or ".", f"model_{run_id}_iter_{iteration}")
-    model_path = str(model_path)
-
-    if os.path.exists(model_path):
-        raise FileExistsError(f"Model output directory already exists: {model_path}")
 
     allow_overwrite_output = bool(submission_cfg.get("allow_overwrite_output", True))
     if os.path.exists(output_path) and not allow_overwrite_output:
@@ -513,6 +814,7 @@ def main() -> None:
     pipeline_script_path: Optional[str] = None
     preprocessor_path: Optional[str] = None
     feature_path: Optional[str] = None
+    feature_block_paths: List[str] = []
 
     legacy_override = bool(args.preprocessor_path or args.feature_path)
     if legacy_override:
@@ -534,39 +836,95 @@ def main() -> None:
         assert_module_functions(preprocessor_module, ["fit_preprocessor", "transform_preprocessor"], "preprocessor")
         assert_module_functions(feature_module, ["fit_feature_engineering", "transform_feature_engineering"], "feature_engineering")
     else:
-        pipeline_script_path, explicitly_configured = resolve_pipeline_script_path(
-            run_id=run_id,
-            iteration=iteration,
-            submission_cfg=submission_cfg,
-            pipeline_override=args.pipeline_script_path,
+        can_use_final_selection = (
+            args.iteration is None
+            and not bool(args.pipeline_script_path)
+            and bool(submission_cfg.get("use_final_selection_from_run", True))
         )
-        if not os.path.exists(pipeline_script_path):
-            if explicitly_configured:
-                raise FileNotFoundError(f"Pipeline script not found: {pipeline_script_path}")
+        final_pre: Optional[str] = None
+        final_blocks: List[str] = []
+        if can_use_final_selection:
+            final_pre, final_blocks, final_source = resolve_final_selection_bundle(
+                run_id=run_id,
+                submission_cfg=submission_cfg,
+            )
+            if final_pre is not None:
+                if not os.path.exists(final_pre):
+                    raise FileNotFoundError(f"Final-selection preprocessor module not found: {final_pre}")
+                missing_blocks = [path for path in final_blocks if not os.path.exists(path)]
+                if missing_blocks:
+                    raise FileNotFoundError(f"Final-selection feature block module(s) not found: {missing_blocks}")
+                preprocessor_path = final_pre
+                feature_block_paths = final_blocks
+                preprocessor_module, feature_module = load_modules_from_module_bundle(
+                    preprocessor_module_path=preprocessor_path,
+                    feature_block_module_paths=feature_block_paths,
+                )
+                module_source = f"module_bundle:{final_source}"
 
-            module_source = "legacy_modules"
-            preprocessor_path, feature_path = resolve_module_paths(
+        can_use_bundle = not bool(args.pipeline_script_path)
+        bundle_pre: Optional[str] = None
+        bundle_blocks: List[str] = []
+        if can_use_bundle and final_pre is None:
+            bundle_pre, bundle_blocks, bundle_source = resolve_generated_module_bundle(
                 run_id=run_id,
                 iteration=iteration,
                 submission_cfg=submission_cfg,
-                preprocessor_override=args.preprocessor_path,
-                feature_override=args.feature_path,
             )
-            if not os.path.exists(preprocessor_path):
-                raise FileNotFoundError(
-                    f"Pipeline script not found ({pipeline_script_path}) and preprocessor module not found: {preprocessor_path}"
+            if bundle_pre is not None:
+                if not os.path.exists(bundle_pre):
+                    raise FileNotFoundError(f"Generated preprocessor module not found: {bundle_pre}")
+                missing_blocks = [path for path in bundle_blocks if not os.path.exists(path)]
+                if missing_blocks:
+                    raise FileNotFoundError(f"Generated feature block module(s) not found: {missing_blocks}")
+                preprocessor_path = bundle_pre
+                feature_block_paths = bundle_blocks
+                preprocessor_module, feature_module = load_modules_from_module_bundle(
+                    preprocessor_module_path=preprocessor_path,
+                    feature_block_module_paths=feature_block_paths,
                 )
-            if not os.path.exists(feature_path):
-                raise FileNotFoundError(
-                    f"Pipeline script not found ({pipeline_script_path}) and feature engineering module not found: {feature_path}"
-                )
+                module_source = f"module_bundle:{bundle_source}"
 
-            preprocessor_module = load_module_from_path(preprocessor_path, "submission_preprocessor_module")
-            feature_module = load_module_from_path(feature_path, "submission_feature_engineering_module")
-            assert_module_functions(preprocessor_module, ["fit_preprocessor", "transform_preprocessor"], "preprocessor")
-            assert_module_functions(feature_module, ["fit_feature_engineering", "transform_feature_engineering"], "feature_engineering")
-        else:
-            preprocessor_module, feature_module = load_modules_from_pipeline_script(pipeline_script_path)
+        if bundle_pre is None and final_pre is None:
+            pipeline_script_path, explicitly_configured = resolve_pipeline_script_path(
+                run_id=run_id,
+                iteration=iteration,
+                submission_cfg=submission_cfg,
+                pipeline_override=args.pipeline_script_path,
+            )
+            if not os.path.exists(pipeline_script_path):
+                if explicitly_configured:
+                    raise FileNotFoundError(f"Pipeline script not found: {pipeline_script_path}")
+
+                module_source = "legacy_modules"
+                preprocessor_path, feature_path = resolve_module_paths(
+                    run_id=run_id,
+                    iteration=iteration,
+                    submission_cfg=submission_cfg,
+                    preprocessor_override=args.preprocessor_path,
+                    feature_override=args.feature_path,
+                )
+                if not os.path.exists(preprocessor_path):
+                    raise FileNotFoundError(
+                        f"Pipeline script not found ({pipeline_script_path}) and preprocessor module not found: {preprocessor_path}"
+                    )
+                if not os.path.exists(feature_path):
+                    raise FileNotFoundError(
+                        f"Pipeline script not found ({pipeline_script_path}) and feature engineering module not found: {feature_path}"
+                    )
+
+                preprocessor_module = load_module_from_path(preprocessor_path, "submission_preprocessor_module")
+                feature_module = load_module_from_path(feature_path, "submission_feature_engineering_module")
+                assert_module_functions(preprocessor_module, ["fit_preprocessor", "transform_preprocessor"], "preprocessor")
+                assert_module_functions(feature_module, ["fit_feature_engineering", "transform_feature_engineering"], "feature_engineering")
+            else:
+                preprocessor_module, feature_module = load_modules_from_pipeline_script(pipeline_script_path)
+
+                # If assembled-script style was resolved from constants, report module bundle source.
+                if hasattr(feature_module, "__class__") and feature_module.__class__.__name__ == "SubmissionComposedFeatureEngineering":
+                    module_source = "module_bundle:assembled_pipeline_constants"
+                else:
+                    module_source = "pipeline_script"
 
     train_df = load_csv(train_path)
     test_df = load_csv(test_path)
@@ -597,15 +955,19 @@ def main() -> None:
     )
 
     fit_kwargs = build_fit_kwargs(model_cfg=submission_model_cfg, fit_cfg=submission_fit_cfg)
-    predictor = TabularPredictor(
-        label=label_col,
-        eval_metric=submission_model_cfg.get("eval_metric"),
-        problem_type=submission_model_cfg.get("problem_type"),
-        path=model_path,
-    )
-    predictor.fit(train_data=train_ag, tuning_data=tuning_ag, **fit_kwargs)
+    temp_model_path = tempfile.mkdtemp(prefix=f"ag_submission_{run_id}_iter_{iteration}_")
+    try:
+        predictor = TabularPredictor(
+            label=label_col,
+            eval_metric=submission_model_cfg.get("eval_metric"),
+            problem_type=submission_model_cfg.get("problem_type"),
+            path=temp_model_path,
+        )
+        predictor.fit(train_data=train_ag, tuning_data=tuning_ag, **fit_kwargs)
+        predictions = predictor.predict(test_ag)
+    finally:
+        shutil.rmtree(temp_model_path, ignore_errors=True)
 
-    predictions = predictor.predict(test_ag)
     submission_df = sample_submission_df.copy()
     if id_col in test_df.columns and id_col in submission_df.columns:
         submission_df[id_col] = test_df[id_col].values
@@ -615,12 +977,15 @@ def main() -> None:
     print(f"[INFO] run_id: {run_id}, iteration: {iteration}")
     print(f"[INFO] iteration_source: {iteration_source}")
     print(f"[INFO] module_source: {module_source}")
-    if module_source == "pipeline_script":
+    if module_source.startswith("pipeline_script"):
         print(f"[INFO] pipeline_script: {pipeline_script_path}")
+    elif module_source.startswith("module_bundle"):
+        print(f"[INFO] preprocessor_module: {preprocessor_path}")
+        print(f"[INFO] feature_block_modules: {len(feature_block_paths)}")
     else:
         print(f"[INFO] preprocessor: {preprocessor_path}")
         print(f"[INFO] feature_engineering: {feature_path}")
-    print(f"[INFO] model saved to: {model_path}")
+    print("[INFO] model artifacts: disabled (temporary path auto-removed)")
     print(f"[INFO] submission saved to: {output_path}")
 
 

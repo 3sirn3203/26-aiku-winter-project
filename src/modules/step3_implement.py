@@ -4,23 +4,27 @@ import ast
 import json
 import os
 import re
-import subprocess
-import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from google import genai
 from jinja2 import Template
 
-IMPLEMENT_E2E_SYSTEM_INSTRUCTION = """You complete TODO sections in a fixed Python skeleton for tabular ML.
+PREPROCESSOR_SYSTEM_INSTRUCTION = """You implement preprocessing module code for tabular ML.
 Return only executable Python code.
-Return the full final script, not a snippet.
-Do not include markdown fences.
-Do not include explanations.
-Do not remove CLI arguments or JSON output behavior.
-The script must define `main()` and include:
-if __name__ == "__main__":
-    main()"""
+Return exactly one class definition named GeneratedPreprocessor.
+Do not include markdown fences or explanations."""
+
+FEATURE_BLOCK_SYSTEM_INSTRUCTION = """You implement one feature block class for tabular ML.
+Return only executable Python code.
+Return exactly one class definition.
+Do not include markdown fences or explanations."""
+
+MODULE_HEADER = """from __future__ import annotations
+from typing import Any, Dict
+import pandas as pd
+
+"""
 
 
 def implement(
@@ -37,8 +41,8 @@ def implement(
 ) -> Dict[str, Any]:
     del train_path, label_col, pipeline_config
 
-    implement_dir = os.path.join(output_dir, "implement")
-    os.makedirs(implement_dir, exist_ok=True)
+    implement_dir = Path(output_dir) / "implement"
+    implement_dir.mkdir(parents=True, exist_ok=True)
 
     model = str(implement_cfg.get("model", "gemini-2.5-flash"))
     temperature = float(implement_cfg.get("temperature", 0.2))
@@ -47,108 +51,155 @@ def implement(
         implement_cfg.get("max_output_tokens", implement_cfg.get("max_tokens", 8192))
     )
     max_codegen_attempts = int(implement_cfg.get("max_codegen_attempts", 2))
+    max_feature_block_attempts = int(
+        implement_cfg.get("max_feature_block_attempts", max_codegen_attempts)
+    )
     syntax_check = bool(implement_cfg.get("syntax_check", True))
-    prompt_path = Path(
+
+    preprocessor_prompt_path = Path(
         str(implement_cfg.get("prompt_path", "src/prompt/3_implement_e2e.j2"))
     )
-    skeleton_path = Path(
+    feature_block_prompt_path = Path(
         str(
             implement_cfg.get(
-                "skeleton_path",
-                "src/prompt/3_implement_e2e_skeleton.py",
+                "feature_block_prompt_path",
+                "src/prompt/3_implement_feature_block.j2",
             )
         )
     )
-    system_instruction = str(
-        implement_cfg.get("system_instruction", IMPLEMENT_E2E_SYSTEM_INSTRUCTION)
+    preprocessor_system_instruction = str(
+        implement_cfg.get("system_instruction", PREPROCESSOR_SYSTEM_INSTRUCTION)
+    )
+    feature_block_system_instruction = str(
+        implement_cfg.get(
+            "feature_block_system_instruction",
+            FEATURE_BLOCK_SYSTEM_INSTRUCTION,
+        )
     )
 
-    if not prompt_path.exists():
-        raise FileNotFoundError(f"Prompt template not found: {prompt_path}")
-    if not skeleton_path.exists():
-        raise FileNotFoundError(f"Skeleton template not found: {skeleton_path}")
+    if not preprocessor_prompt_path.exists():
+        raise FileNotFoundError(f"Prompt template not found: {preprocessor_prompt_path}")
+    if not feature_block_prompt_path.exists():
+        raise FileNotFoundError(f"Feature block prompt template not found: {feature_block_prompt_path}")
 
     profile_context = _build_profile_context(profile_result=profile_result, implement_cfg=implement_cfg)
     preprocessing_hypotheses = _normalize_text_list(hypotheses.get("preprocessing"))
     feature_hypotheses = _normalize_text_list(hypotheses.get("feature_engineering"))
-    skeleton_code = skeleton_path.read_text(encoding="utf-8")
-    template = Template(prompt_path.read_text(encoding="utf-8"))
-    output_script_path = Path(implement_dir) / "implement_pipeline.py"
 
-    code, generation_meta = _generate_pipeline_script(
+    preprocessor_template = Template(preprocessor_prompt_path.read_text(encoding="utf-8"))
+    feature_block_template = Template(feature_block_prompt_path.read_text(encoding="utf-8"))
+
+    preprocessor_result = _generate_preprocessor_module(
         client=client,
-        template=template,
-        skeleton_code=skeleton_code,
-        profile_context=profile_context,
-        preprocessing_hypotheses=preprocessing_hypotheses,
-        feature_hypotheses=feature_hypotheses,
-        output_script_path=output_script_path,
+        template=preprocessor_template,
+        implement_dir=implement_dir,
         model=model,
         temperature=temperature,
         top_p=top_p,
         max_output_tokens=max_output_tokens,
-        max_codegen_attempts=max_codegen_attempts,
+        max_attempts=max_codegen_attempts,
         syntax_check=syntax_check,
-        system_instruction=system_instruction,
+        system_instruction=preprocessor_system_instruction,
+        profile_context=profile_context,
+        preprocessing_hypotheses=preprocessing_hypotheses,
+        feature_hypotheses=feature_hypotheses,
         external_feedback=external_feedback,
         task_context=task_context,
     )
 
+    feature_block_results: List[Dict[str, Any]] = []
+    for index, hypothesis_text in enumerate(feature_hypotheses, start=1):
+        class_name = f"GeneratedFeatureBlock{index}"
+        block_result = _generate_feature_block_module(
+            client=client,
+            template=feature_block_template,
+            implement_dir=implement_dir,
+            model=model,
+            temperature=temperature,
+            top_p=top_p,
+            max_output_tokens=max_output_tokens,
+            max_attempts=max_feature_block_attempts,
+            syntax_check=syntax_check,
+            system_instruction=feature_block_system_instruction,
+            class_name=class_name,
+            index=index,
+            hypothesis_text=hypothesis_text,
+            profile_context=profile_context,
+            external_feedback=external_feedback,
+            task_context=task_context,
+        )
+        feature_block_results.append(block_result)
+
+    feature_block_manifest_path = implement_dir / "feature_blocks_manifest.json"
+    _write_json(
+        feature_block_manifest_path,
+        {
+            "count": len(feature_block_results),
+            "blocks": [
+                {
+                    "index": item.get("index"),
+                    "class_name": item.get("class_name"),
+                    "hypothesis": item.get("hypothesis"),
+                    "module_path": item.get("path"),
+                }
+                for item in feature_block_results
+            ],
+        },
+    )
+
+    planned_pipeline_script_path = str(Path(output_dir) / "execute" / "assembled_pipeline.py")
     summary = {
-        "pipeline_script_path": str(output_script_path),
+        "pipeline_script_path": planned_pipeline_script_path,
+        "preprocessor_module_path": preprocessor_result.get("path"),
+        "feature_block_module_paths": [item.get("path") for item in feature_block_results],
+        "feature_block_manifest_path": str(feature_block_manifest_path),
         "meta": {
-            "mode": "e2e_skeleton_todo_completion",
+            "mode": "module_codegen_then_execute_assembly",
             "model": model,
             "temperature": temperature,
             "top_p": top_p,
             "max_output_tokens": max_output_tokens,
             "max_codegen_attempts": max_codegen_attempts,
+            "max_feature_block_attempts": max_feature_block_attempts,
             "syntax_check": syntax_check,
-            "prompt_path": str(prompt_path),
-            "skeleton_path": str(skeleton_path),
-            "system_instruction": system_instruction,
-            "external_feedback": external_feedback,
-            "task_context": task_context,
+            "preprocessor_prompt_path": str(preprocessor_prompt_path),
+            "feature_block_prompt_path": str(feature_block_prompt_path),
+            "preprocessor_system_instruction": preprocessor_system_instruction,
+            "feature_block_system_instruction": feature_block_system_instruction,
             "profile_context_keys": list(profile_context.keys()),
-            "generation": generation_meta,
+            "preprocessing_hypothesis_count": len(preprocessing_hypotheses),
+            "feature_hypothesis_count": len(feature_hypotheses),
         },
     }
-
-    with open(os.path.join(implement_dir, "implement_summary.json"), "w", encoding="utf-8") as file:
-        json.dump(summary, file, ensure_ascii=False, indent=2)
-    with open(os.path.join(implement_dir, "implement_pipeline.py"), "w", encoding="utf-8") as file:
-        file.write(code)
+    _write_json(implement_dir / "implement_summary.json", summary)
     return summary
 
 
-def _generate_pipeline_script(
+def _generate_preprocessor_module(
     client: genai.Client,
     template: Template,
-    skeleton_code: str,
-    profile_context: Dict[str, Any],
-    preprocessing_hypotheses: List[str],
-    feature_hypotheses: List[str],
-    output_script_path: Path,
+    implement_dir: Path,
     model: str,
     temperature: float,
     top_p: float,
     max_output_tokens: int,
-    max_codegen_attempts: int,
+    max_attempts: int,
     syntax_check: bool,
     system_instruction: str,
+    profile_context: Dict[str, Any],
+    preprocessing_hypotheses: List[str],
+    feature_hypotheses: List[str],
     external_feedback: Optional[Dict[str, Any]],
     task_context: Optional[Dict[str, Any]],
-) -> tuple[str, Dict[str, Any]]:
-    stage_dir = output_script_path.parent
-    last_raw_text = ""
-    last_response_meta: Dict[str, Any] = {}
+) -> Dict[str, Any]:
+    output_path = implement_dir / "preprocessor_module.py"
     last_error = ""
     feedback: Optional[Dict[str, Any]] = None
-    final_code: Optional[str] = None
+    last_raw_text = ""
+    last_response_meta: Dict[str, Any] = {}
 
-    for attempt in range(1, max_codegen_attempts + 1):
+    for attempt in range(1, max_attempts + 1):
         prompt = template.render(
-            skeleton_code=skeleton_code,
             profile_result_json=json.dumps(profile_context, ensure_ascii=False),
             preprocessing_hypotheses_json=json.dumps(preprocessing_hypotheses, ensure_ascii=False),
             feature_hypotheses_json=json.dumps(feature_hypotheses, ensure_ascii=False),
@@ -159,6 +210,10 @@ def _generate_pipeline_script(
             ),
             generation_feedback_json=json.dumps(feedback, ensure_ascii=False) if feedback is not None else "null",
             external_feedback_json=json.dumps(external_feedback, ensure_ascii=False) if external_feedback is not None else "null",
+        )
+        print(
+            f"    [Step3:preprocessor] LLM attempt {attempt}/{max_attempts} "
+            f"model={model} prompt_chars={len(prompt)}"
         )
         response = client.models.generate_content(
             model=model,
@@ -175,60 +230,244 @@ def _generate_pipeline_script(
         raw_text = str(getattr(response, "text", "") or "").strip()
         last_raw_text = raw_text
         last_response_meta = response_meta
-
-        code = _extract_python_code(raw_text)
-        output_script_path.write_text(code, encoding="utf-8")
+        print(
+            f"    [Step3:preprocessor] LLM attempt {attempt} "
+            f"response_chars={len(raw_text)} finish_reason={response_meta.get('finish_reason', 'unknown')}"
+        )
 
         try:
-            _assert_has_main(code)
+            code = _extract_python_code(raw_text)
+            class_code = _extract_single_class_code(code=code, expected_class_name="GeneratedPreprocessor")
+            _validate_class_methods(
+                class_code=class_code,
+                class_name="GeneratedPreprocessor",
+                required_methods=["fit_preprocessor", "transform_preprocessor"],
+            )
+            module_code = MODULE_HEADER + class_code.strip() + "\n"
             if syntax_check:
-                _syntax_check(script_path=output_script_path)
-            final_code = code
-            last_error = ""
-            feedback = None
-            break
+                _syntax_check_text(module_code, file_label="preprocessor_module")
+            output_path.write_text(module_code, encoding="utf-8")
+            print(f"    [Step3:preprocessor] LLM attempt {attempt} parsed successfully")
+            _write_json(
+                implement_dir / "preprocessor_raw_response.json",
+                {
+                    "raw_text": raw_text,
+                    "response_meta": response_meta,
+                    "last_error": "",
+                },
+            )
+            return {
+                "path": str(output_path),
+                "class_name": "GeneratedPreprocessor",
+                "response_meta": response_meta,
+            }
         except Exception as exc:  # noqa: BLE001
             last_error = str(exc)
             feedback = {"attempt": attempt, "error": last_error}
-            with open(stage_dir / f"implement_attempt_{attempt}.json", "w", encoding="utf-8") as file:
-                json.dump(
-                    {
-                        "attempt": attempt,
-                        "error": last_error,
-                        "response_meta": response_meta,
-                        "raw_text": raw_text,
-                    },
-                    file,
-                    ensure_ascii=False,
-                    indent=2,
-                )
+            print(f"    [Step3:preprocessor] LLM attempt {attempt} failed: {last_error}")
+            _write_json(
+                implement_dir / f"preprocessor_attempt_{attempt}.json",
+                {
+                    "attempt": attempt,
+                    "error": last_error,
+                    "response_meta": response_meta,
+                    "raw_text": raw_text,
+                },
+            )
 
-    if final_code is None:
-        raise RuntimeError(f"Failed to generate valid e2e implement script: {last_error}")
-
-    with open(stage_dir / "implement_raw_response.json", "w", encoding="utf-8") as file:
-        json.dump(
-            {
-                "raw_text": last_raw_text,
-                "response_meta": last_response_meta,
-                "last_error": last_error,
-                "syntax_check": syntax_check,
-            },
-            file,
-            ensure_ascii=False,
-            indent=2,
-        )
-    return final_code, {"last_error": last_error}
-
-
-def _assert_has_main(code: str) -> None:
-    tree = ast.parse(code)
-    has_main = any(
-        isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "main"
-        for node in ast.walk(tree)
+    _write_json(
+        implement_dir / "preprocessor_raw_response.json",
+        {
+            "raw_text": last_raw_text,
+            "response_meta": last_response_meta,
+            "last_error": last_error,
+        },
     )
-    if not has_main:
-        raise ValueError("Generated script must define main().")
+    raise RuntimeError(f"Failed to generate preprocessor module: {last_error}")
+
+
+def _generate_feature_block_module(
+    client: genai.Client,
+    template: Template,
+    implement_dir: Path,
+    model: str,
+    temperature: float,
+    top_p: float,
+    max_output_tokens: int,
+    max_attempts: int,
+    syntax_check: bool,
+    system_instruction: str,
+    class_name: str,
+    index: int,
+    hypothesis_text: str,
+    profile_context: Dict[str, Any],
+    external_feedback: Optional[Dict[str, Any]],
+    task_context: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    output_path = implement_dir / f"feature_block_{index}.py"
+    last_error = ""
+    feedback: Optional[Dict[str, Any]] = None
+    last_raw_text = ""
+    last_response_meta: Dict[str, Any] = {}
+
+    for attempt in range(1, max_attempts + 1):
+        prompt = template.render(
+            class_name=class_name,
+            feature_index=index,
+            hypothesis_text=hypothesis_text,
+            profile_result_json=json.dumps(profile_context, ensure_ascii=False),
+            task_context_json=(
+                json.dumps(task_context, ensure_ascii=False)
+                if isinstance(task_context, dict) and task_context
+                else "null"
+            ),
+            generation_feedback_json=json.dumps(feedback, ensure_ascii=False) if feedback is not None else "null",
+            external_feedback_json=json.dumps(external_feedback, ensure_ascii=False) if external_feedback is not None else "null",
+        )
+        print(
+            f"    [Step3:feature_block_{index}] LLM attempt {attempt}/{max_attempts} "
+            f"model={model} prompt_chars={len(prompt)}"
+        )
+        response = client.models.generate_content(
+            model=model,
+            contents=prompt,
+            config={
+                "temperature": temperature,
+                "top_p": top_p,
+                "max_output_tokens": max_output_tokens,
+                "response_mime_type": "text/plain",
+                "system_instruction": system_instruction,
+            },
+        )
+        response_meta = _extract_response_meta(response)
+        raw_text = str(getattr(response, "text", "") or "").strip()
+        last_raw_text = raw_text
+        last_response_meta = response_meta
+        print(
+            f"    [Step3:feature_block_{index}] LLM attempt {attempt} "
+            f"response_chars={len(raw_text)} finish_reason={response_meta.get('finish_reason', 'unknown')}"
+        )
+
+        try:
+            code = _extract_python_code(raw_text)
+            class_code = _extract_single_class_code(code=code, expected_class_name=class_name)
+            _validate_class_methods(
+                class_code=class_code,
+                class_name=class_name,
+                required_methods=["fit", "transform"],
+            )
+            module_code = MODULE_HEADER + class_code.strip() + "\n"
+            if syntax_check:
+                _syntax_check_text(module_code, file_label=f"feature_block_{index}")
+            output_path.write_text(module_code, encoding="utf-8")
+            print(f"    [Step3:feature_block_{index}] LLM attempt {attempt} parsed successfully")
+            _write_json(
+                implement_dir / f"feature_block_{index}_raw_response.json",
+                {
+                    "raw_text": raw_text,
+                    "response_meta": response_meta,
+                    "last_error": "",
+                    "hypothesis": hypothesis_text,
+                },
+            )
+            return {
+                "index": index,
+                "class_name": class_name,
+                "hypothesis": hypothesis_text,
+                "path": str(output_path),
+                "response_meta": response_meta,
+            }
+        except Exception as exc:  # noqa: BLE001
+            last_error = str(exc)
+            feedback = {"attempt": attempt, "error": last_error}
+            print(f"    [Step3:feature_block_{index}] LLM attempt {attempt} failed: {last_error}")
+            _write_json(
+                implement_dir / f"feature_block_{index}_attempt_{attempt}.json",
+                {
+                    "attempt": attempt,
+                    "error": last_error,
+                    "response_meta": response_meta,
+                    "raw_text": raw_text,
+                    "class_name": class_name,
+                    "hypothesis": hypothesis_text,
+                },
+            )
+
+    _write_json(
+        implement_dir / f"feature_block_{index}_raw_response.json",
+        {
+            "raw_text": last_raw_text,
+            "response_meta": last_response_meta,
+            "last_error": last_error,
+            "hypothesis": hypothesis_text,
+        },
+    )
+    raise RuntimeError(f"Failed to generate feature block {index}: {last_error}")
+
+
+def _extract_single_class_code(code: str, expected_class_name: str) -> str:
+    tree = ast.parse(code)
+    class_nodes = [node for node in tree.body if isinstance(node, ast.ClassDef)]
+    if not class_nodes:
+        raise ValueError("No class definition found.")
+
+    target: Optional[ast.ClassDef] = None
+    for node in class_nodes:
+        if node.name == expected_class_name:
+            target = node
+            break
+
+    if target is None:
+        if len(class_nodes) != 1:
+            names = [node.name for node in class_nodes]
+            raise ValueError(
+                "Expected one class or matching class name, "
+                f"expected={expected_class_name}, found={names}"
+            )
+        target = class_nodes[0]
+        rename = True
+    else:
+        rename = False
+
+    class_code = _extract_node_source(code=code, node=target)
+    if rename:
+        class_code = re.sub(
+            r"^(\s*class\s+)[A-Za-z_][A-Za-z0-9_]*",
+            rf"\1{expected_class_name}",
+            class_code,
+            count=1,
+            flags=re.MULTILINE,
+        )
+    return class_code
+
+
+def _extract_node_source(code: str, node: ast.AST) -> str:
+    start = getattr(node, "lineno", None)
+    end = getattr(node, "end_lineno", None)
+    if start is None or end is None:
+        raise ValueError("Cannot extract class source lines.")
+    lines = code.splitlines()
+    return "\n".join(lines[start - 1 : end])
+
+
+def _validate_class_methods(class_code: str, class_name: str, required_methods: List[str]) -> None:
+    tree = ast.parse(class_code)
+    class_nodes = [node for node in tree.body if isinstance(node, ast.ClassDef)]
+    if len(class_nodes) != 1:
+        raise ValueError(f"{class_name} output must contain exactly one class.")
+
+    node = class_nodes[0]
+    if node.name != class_name:
+        raise ValueError(f"Expected class {class_name}, got {node.name}")
+
+    method_names = {
+        item.name
+        for item in node.body
+        if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    missing = [name for name in required_methods if name not in method_names]
+    if missing:
+        raise ValueError(f"{class_name} missing required methods: {missing}")
 
 
 def _extract_python_code(raw_text: str) -> str:
@@ -242,17 +481,11 @@ def _extract_python_code(raw_text: str) -> str:
     return text
 
 
-def _syntax_check(script_path: Path) -> None:
-    proc = subprocess.run(
-        [sys.executable, "-m", "py_compile", str(script_path)],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if proc.returncode != 0:
-        stderr = (proc.stderr or "").strip()
-        stdout = (proc.stdout or "").strip()
-        raise ValueError(f"Python syntax check failed. stderr={stderr} stdout={stdout}")
+def _syntax_check_text(code: str, file_label: str) -> None:
+    try:
+        ast.parse(code)
+    except Exception as exc:  # noqa: BLE001
+        raise ValueError(f"Python syntax check failed for {file_label}: {exc}") from exc
 
 
 def _normalize_text_list(value: Any) -> List[str]:
@@ -300,7 +533,9 @@ def _build_profile_context(profile_result: Dict[str, Any], implement_cfg: Dict[s
             context[key] = _trim_profile_value(value=value, max_items=max_items, max_text_chars=max_text_chars)
 
     if not context:
-        for key, value in list(profile_result.items())[:max_items]:
+        for idx, (key, value) in enumerate(profile_result.items()):
+            if idx >= max_items:
+                break
             context[str(key)] = _trim_profile_value(value=value, max_items=max_items, max_text_chars=max_text_chars)
 
     context["_keys_in_original_profile"] = list(profile_result.keys())
@@ -367,3 +602,9 @@ def _to_jsonable(value: Any) -> Any:
         except Exception:
             pass
     return str(value)
+
+
+def _write_json(path: Path, payload: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as file:
+        json.dump(payload, file, ensure_ascii=False, indent=2)

@@ -1,25 +1,36 @@
-You are implementing TODO sections in a fixed end-to-end tabular ML script.
+You are implementing only the preprocessing module for a tabular ML pipeline.
 
 Task:
-- Fill TODO parts for preprocessing + feature engineering based on profile + hypotheses.
-- Keep the script executable and deterministic.
-- Preserve all CLI arguments and output JSON structure.
+- Implement TODO only for preprocessing logic.
+- Return exactly one class definition: `GeneratedPreprocessor`.
+- Do not return a full script.
 
-Rules:
+Output rules:
 - Return only executable Python code.
-- Return the full final script, not a snippet/patch/diff.
 - No markdown fences.
-- Do not remove required imports, argument parsing, or `main()`.
-- Must include `def main() -> None:`.
-- Must include final entrypoint guard:
-  `if __name__ == "__main__":`
-  `    main()`
-- Keep the existing CLI and output JSON behavior from the skeleton unchanged.
-- Do not add file/network dependencies outside existing project modules.
-- Handle missing values robustly.
-- Keep train/valid schema alignment stable.
-- Ensure generated feature column names are safe (`[A-Za-z0-9_]`) and unique.
-- Avoid leakage from target column into features.
+- No explanations.
+- No imports.
+- Must preserve method signatures.
+- Must avoid target leakage.
+- Must be deterministic and robust to missing values.
+
+Preprocessing class skeleton (fill TODO only, keep interface):
+class GeneratedPreprocessor:
+    def fit_preprocessor(self, train_df: pd.DataFrame, label_col: str, config: Dict[str, Any]) -> Dict[str, Any]:
+        # TODO: implement preprocessing state fitting.
+        # Must only use train_df.
+        # Must preserve label column handling.
+        ...
+
+    def transform_preprocessor(self, df: pd.DataFrame, prep_state: Dict[str, Any], config: Dict[str, Any]) -> pd.DataFrame:
+        # TODO: implement preprocessing transform.
+        # If label_col exists in input, preserve it.
+        # Keep stable output schema.
+        ...
+
+# The following pipeline parts exist but are not your output target:
+# class GeneratedFeatureEngineering: ...
+# def main() -> None: ...
 
 Profile context JSON:
 {{ profile_result_json }}
@@ -30,7 +41,7 @@ Task context JSON (nullable):
 Preprocessing hypotheses:
 {{ preprocessing_hypotheses_json }}
 
-Feature engineering hypotheses:
+Feature engineering hypotheses (context only, do not implement here):
 {{ feature_hypotheses_json }}
 
 External execution feedback (nullable):
@@ -38,6 +49,3 @@ External execution feedback (nullable):
 
 Previous generation feedback (nullable):
 {{ generation_feedback_json }}
-
-You must complete TODO sections in this skeleton:
-{{ skeleton_code }}

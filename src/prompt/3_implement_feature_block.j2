@@ -1,0 +1,60 @@
+You are implementing one feature-engineering module for exactly one hypothesis.
+
+Task:
+- Implement exactly one hypothesis as exactly one new feature.
+- Return exactly one class definition: `{{ class_name }}`.
+- Do not return any wrapper script.
+
+Output rules:
+- Return only executable Python code.
+- No markdown fences.
+- No explanations.
+- No imports.
+- `fit` must use only train data.
+- `transform` must return one `pd.Series` aligned to `df.index`.
+- Do not use target/label values to compute feature values.
+- Keep logic deterministic and robust to missing values.
+- Feature name must be safe (`[A-Za-z0-9_]`).
+
+Feature block skeleton (fill TODO only, keep interface):
+class {{ class_name }}:
+    FEATURE_NAME = "TODO_SAFE_FEATURE_NAME"
+
+    def fit(self, train_df: pd.DataFrame, label_col: str, config: Dict[str, Any]) -> Dict[str, Any]:
+        # TODO: compute and return state needed for transform.
+        # Must only use train_df and must not leak label.
+        ...
+
+    def transform(
+        self,
+        df: pd.DataFrame,
+        block_state: Dict[str, Any],
+        label_col: str,
+        config: Dict[str, Any],
+    ) -> pd.Series:
+        # TODO: return exactly one feature series.
+        # Length/index must match df.index.
+        ...
+
+# The following pipeline parts exist but are not your output target:
+# class GeneratedPreprocessor: ...
+# class GeneratedFeatureEngineering: ...
+# def main() -> None: ...
+
+Feature hypothesis (must implement exactly this):
+{{ hypothesis_text }}
+
+Feature block index:
+{{ feature_index }}
+
+Profile context JSON:
+{{ profile_result_json }}
+
+Task context JSON (nullable):
+{{ task_context_json }}
+
+External execution feedback (nullable):
+{{ external_feedback_json }}
+
+Previous generation feedback (nullable):
+{{ generation_feedback_json }}

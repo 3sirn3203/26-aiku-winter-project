@@ -12,7 +12,8 @@ from pydantic import BaseModel, Field, ValidationError
 
 HYPOTHESIS_SYSTEM_INSTRUCTION = """You generate hypotheses for tabular ML.
 Return only a valid JSON object matching the schema.
-Do not include markdown fences or explanations outside JSON."""
+Do not include markdown fences or explanations outside JSON.
+For each feature_engineering item, propose one concrete derived feature that combines multiple source columns."""
 
 HYPOTHESIS_WEB_RESEARCH_SYSTEM_INSTRUCTION = """You are a web research agent for tabular ML feature engineering.
 Use Google Search to find practical preprocessing and feature engineering methods.
@@ -90,9 +91,13 @@ def generate_hypotheses(
     )
 
     prompt_template = Template(prompt_path.read_text(encoding="utf-8"))
+    feature_engineering_hypothesis_count = _resolve_feature_engineering_hypothesis_count(hypothesis_cfg)
     prompt = prompt_template.render(
         profile_result_json=json.dumps(profile_result, ensure_ascii=False),
         web_research_json=json.dumps(web_research.get("context"), ensure_ascii=False),
+        feature_engineering_count_instruction=_build_feature_engineering_count_instruction(
+            feature_engineering_hypothesis_count
+        ),
         task_context_json=(
             json.dumps(task_context, ensure_ascii=False)
             if isinstance(task_context, dict) and task_context
@@ -143,6 +148,10 @@ def generate_hypotheses(
             )
             parsed = _parse_hypothesis_response(response=response, raw_text=raw_text)
             normalized = parsed.model_dump()
+            normalized = _enforce_feature_engineering_hypothesis_count(
+                normalized=normalized,
+                required_count=feature_engineering_hypothesis_count,
+            )
             last_error = ""
             print(f"    [Step2:hypothesis] LLM attempt {attempt} parsed successfully")
             break
@@ -176,6 +185,10 @@ def generate_hypotheses(
                 "max_output_tokens": max_output_tokens,
                 "max_attempts": max_attempts,
                 "system_instruction": system_instruction,
+                "feature_engineering_hypothesis_count": feature_engineering_hypothesis_count,
+                "feature_engineering_hypothesis_count_actual": len(
+                    normalized.get("feature_engineering", [])
+                ),
                 "raw_text": last_raw_text,
                 "last_error": last_error,
                 "web_research": {
@@ -227,6 +240,60 @@ def _parse_hypothesis_response(response: Any, raw_text: str) -> HypothesisRespon
 
     raw_obj = _parse_json_response(raw_text)
     return HypothesisResponse.model_validate(raw_obj)
+
+
+def _resolve_feature_engineering_hypothesis_count(hypothesis_cfg: Dict[str, Any]) -> Optional[int]:
+    keys = [
+        "feature_engineering_hypothesis_count",
+        "max_feature_engineering_hypotheses",
+        "feature_hypotheses_count",
+    ]
+    for key in keys:
+        value = hypothesis_cfg.get(key)
+        if value is None:
+            continue
+        count = int(value)
+        if count <= 0:
+            raise ValueError(f"hypothesis.{key} must be > 0, got {count}")
+        return count
+    return None
+
+
+def _build_feature_engineering_count_instruction(required_count: Optional[int]) -> str:
+    if required_count is None:
+        return "- Keep `feature_engineering` concise and practical."
+    return (
+        f"- Return exactly {required_count} items in `feature_engineering`."
+        " Do not return fewer or more."
+    )
+
+
+def _enforce_feature_engineering_hypothesis_count(
+    normalized: Dict[str, Any],
+    required_count: Optional[int],
+) -> Dict[str, Any]:
+    if required_count is None:
+        return normalized
+
+    raw_items = normalized.get("feature_engineering", [])
+    if not isinstance(raw_items, list):
+        raise ValueError("feature_engineering must be a list")
+
+    cleaned_items: List[str] = []
+    for item in raw_items:
+        text = str(item or "").strip()
+        if text:
+            cleaned_items.append(text)
+
+    if len(cleaned_items) < required_count:
+        raise ValueError(
+            "feature_engineering_count_mismatch: "
+            f"required={required_count}, actual={len(cleaned_items)}"
+        )
+
+    output = dict(normalized)
+    output["feature_engineering"] = cleaned_items[:required_count]
+    return output
 
 
 def _run_hypothesis_web_research(

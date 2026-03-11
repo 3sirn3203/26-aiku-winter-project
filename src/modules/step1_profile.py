@@ -66,7 +66,9 @@ def profiling(
     execution_timeout_sec = int(profile_cfg.get("execution_timeout_sec", 120))
     stdout_prompt_max_chars = int(profile_cfg.get("stdout_prompt_max_chars", 12000))
     basic_prompt_path = Path(str(profile_cfg.get("basic_prompt_path", "src/prompt/1_profile_basic.j2")))
-    correlation_prompt_path = Path(str(profile_cfg.get("correlation_prompt_path", "src/prompt/1_profile_correlation.j2")))
+    correlation_script_path = Path(
+        str(profile_cfg.get("correlation_script_path", "src/prompt/1_profile_correlation_fixed.py"))
+    )
     insight_prompt_path = Path(str(profile_cfg.get("insight_prompt_path", "src/prompt/1_profile_insight.j2")))
 
     insight_model = str(profile_cfg.get("insight_model", model))
@@ -116,29 +118,12 @@ def profiling(
         },
     )
 
-    correlation_stage = _run_profile_codegen_stage(
-        client=client,
+    correlation_stage = _run_profile_fixed_stage(
         stage_name="correlation",
-        stage_prompt_path=correlation_prompt_path,
+        stage_script_path=correlation_script_path,
         profile_dir=profile_dir,
         train_path=train_path,
-        prompt_payload={
-            "dataset_context": json.dumps(dataset_context, ensure_ascii=False),
-            "task_context_json": task_context_json,
-            "basic_profile_stdout": basic_stdout_for_prompt,
-            "previous_diagnose_json": (
-                json.dumps(diagnose_prompt_context, ensure_ascii=False)
-                if diagnose_prompt_context is not None
-                else "null"
-            ),
-        },
-        model=model,
-        temperature=temperature,
-        max_output_tokens=max_output_tokens,
-        top_p=top_p,
-        max_codegen_attempts=max_codegen_attempts,
         execution_timeout_sec=execution_timeout_sec,
-        system_instruction=code_system_instruction,
     )
     correlation_stdout_for_prompt = _trim_prompt_text(
         correlation_stage["stdout"],
@@ -149,7 +134,9 @@ def profiling(
         {
             "dataset_context": dataset_context,
             "task_context": task_context,
-            "basic_profile_stdout_preview": basic_stdout_for_prompt,
+            "diagnose_context": diagnose_prompt_context,
+            "correlation_stage_mode": "fixed_script",
+            "correlation_script_path": str(correlation_script_path),
             "correlation_profile_stdout_preview": correlation_stdout_for_prompt,
         },
     )
@@ -230,13 +217,9 @@ def profiling(
                     "raw_text": basic_stage["raw_text"],
                 },
                 "correlation_stage": {
-                    "model": model,
-                    "temperature": temperature,
-                    "max_output_tokens": max_output_tokens,
-                    "top_p": top_p,
-                    "max_codegen_attempts": max_codegen_attempts,
+                    "mode": "fixed_script",
+                    "script_path": str(correlation_script_path),
                     "execution_timeout_sec": execution_timeout_sec,
-                    "system_instruction": code_system_instruction,
                     "raw_text": correlation_stage["raw_text"],
                 },
                 "insight_stage": {
@@ -419,6 +402,78 @@ def _run_profile_codegen_stage(
         "stdout_path": stdout_path,
         "stderr_path": stderr_path,
         "raw_text": last_raw_text,
+    }
+
+
+def _run_profile_fixed_stage(
+    stage_name: str,
+    stage_script_path: Path,
+    profile_dir: str,
+    train_path: str,
+    execution_timeout_sec: int,
+) -> Dict[str, Any]:
+    if not stage_script_path.exists():
+        raise FileNotFoundError(f"Fixed stage script not found: {stage_script_path}")
+
+    stage_code = stage_script_path.read_text(encoding="utf-8")
+    generated_script_path = os.path.join(profile_dir, f"{stage_name}_eda_generated.py")
+    attempt_script_path = os.path.join(profile_dir, f"{stage_name}_eda_attempt_1.py")
+
+    with open(generated_script_path, "w", encoding="utf-8") as file:
+        file.write(stage_code)
+    with open(attempt_script_path, "w", encoding="utf-8") as file:
+        file.write(stage_code)
+
+    print(
+        f"    [Step1:{stage_name}] deterministic stage "
+        f"script={stage_script_path}"
+    )
+
+    exec_result = _execute_eda_script(
+        script_path=attempt_script_path,
+        train_path=train_path,
+        timeout_sec=execution_timeout_sec,
+    )
+    _write_json(os.path.join(profile_dir, f"{stage_name}_exec_attempt_1.json"), exec_result)
+    _write_json(
+        os.path.join(profile_dir, f"{stage_name}_llm_attempt_1.json"),
+        {
+            "raw_text": "",
+            "error": "",
+            "mode": "deterministic_script",
+            "script_path": str(stage_script_path),
+        },
+    )
+
+    if not exec_result.get("success", False):
+        error = str(exec_result.get("error", "execution_failed"))
+        print(f"    [Step1:{stage_name}] EXEC attempt 1 failed: {error}")
+        raise RuntimeError(
+            f"Profile {stage_name} stage failed: deterministic script could not be executed successfully. "
+            f"Last error: {error}"
+        )
+
+    final_stdout = str(exec_result.get("stdout", ""))
+    final_stderr = str(exec_result.get("stderr", ""))
+    print(
+        f"    [Step1:{stage_name}] EXEC attempt 1 success "
+        f"stdout_chars={len(final_stdout)} stderr_chars={len(final_stderr)}"
+    )
+
+    stdout_path = os.path.join(profile_dir, f"profile_{stage_name}.stdout.txt")
+    stderr_path = os.path.join(profile_dir, f"profile_{stage_name}.stderr.txt")
+    with open(stdout_path, "w", encoding="utf-8") as file:
+        file.write(final_stdout)
+    with open(stderr_path, "w", encoding="utf-8") as file:
+        file.write(final_stderr)
+
+    return {
+        "code": stage_code,
+        "stdout": final_stdout,
+        "stderr": final_stderr,
+        "stdout_path": stdout_path,
+        "stderr_path": stderr_path,
+        "raw_text": "deterministic_script",
     }
 
 

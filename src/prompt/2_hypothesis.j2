@@ -13,11 +13,21 @@ Output format (STRICT JSON object):
   "feature_engineering": ["text hypothesis", "..."]
 }
 
+`feature_engineering` item format (STRICT per-item text contract):
+- `feature_name=<name>; columns_used=[col_a,col_b,...]; logic=<how to compute>; expected_effect=<why helpful>; leakage_check=<why no leakage>`
+
 Rules:
 - Focus on hypotheses that can be implemented and evaluated in the next steps.
 - Avoid generic advice. Use the provided profile evidence.
 - Use web research evidence as supporting references when available.
 - If web research is unavailable, rely on profile evidence only.
+- Keep `preprocessing` unconstrained in count.
+{{ feature_engineering_count_instruction }}
+- Every `feature_engineering` hypothesis must define exactly one concrete derived feature.
+- Every `feature_engineering` hypothesis must combine at least 2 original columns.
+- Prefer interactions / ratios / group statistics / cross features over simple one-column transforms.
+- Do not propose plain imputation, plain one-hot encoding, or plain label encoding as a feature hypothesis by itself.
+- Use real column names from profile context in `columns_used`.
 - Do not output markdown.
 
 Profile result:

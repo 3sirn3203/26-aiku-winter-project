@@ -11,12 +11,12 @@
     },
     "feature_engineering": {
         "budget": {
-            "iterations": 2,
+            "iterations": 5,
             "time_limit_per_iteration": 1800
         },
         "profile": {
             "model": "gemini-2.5-flash",
-            "temperature": 0.2,
+            "temperature": 0.05,
             "max_tokens": 8192,
             "top_p": 0.9,
             "max_codegen_attempts": 2,
@@ -26,14 +26,15 @@
         },
         "hypothesis": {
             "model": "gemini-2.5-flash",
-            "temperature": 0.2,
+            "temperature": 0.05,
             "max_tokens": 8192,
             "top_p": 0.9,
             "max_attempts": 2,
+            "feature_engineering_hypothesis_count": 5,
             "web_search": {
                 "enabled": true,
                 "model": "gemini-2.5-flash",
-                "temperature": 0.2,
+                "temperature": 0.05,
                 "max_tokens": 4096,
                 "top_p": 0.9,
                 "max_attempts": 2,
@@ -43,10 +44,11 @@
         },
         "implement": {
             "model": "gemini-2.5-flash",
-            "temperature": 0.2,
+            "temperature": 0.05,
             "max_tokens": 16344,
             "top_p": 0.9,
             "max_codegen_attempts": 2,
+            "max_feature_block_attempts": 2,
             "syntax_check": true
         },
         "execute": {
@@ -57,7 +59,7 @@
         },
         "diagnose": {
             "model": "gemini-2.5-flash",
-            "temperature": 0.2,
+            "temperature": 0.05,
             "top_p": 0.9,
             "max_tokens": 4096,
             "max_attempts": 2,
@@ -109,8 +111,8 @@
         }
     },
     "modeling": {
-        "task_type": "regression",
-        "metric": "rmse",
+        "task_type": "classification",
+        "metric": "f1",
         "validation": {
             "cv_type": "auto",
             "n_splits": 5,
