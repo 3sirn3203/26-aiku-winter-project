@@ -82,6 +82,10 @@ def run_cross_validation(
         valid_fold = train_df.iloc[valid_idx].reset_index(drop=True)
 
         prep_state = preprocessor_module.fit_preprocessor(train_fold.copy(), label_col, runtime_config)
+        target_transform_method = _resolve_target_transform_method(
+            prep_state=prep_state,
+            label_col=label_col,
+        )
         train_pre = preprocessor_module.transform_preprocessor(train_fold.copy(), prep_state, runtime_config)
         valid_pre = preprocessor_module.transform_preprocessor(valid_fold.copy(), prep_state, runtime_config)
         train_pre, valid_pre = _normalize_preprocessed_pair(
@@ -132,7 +136,8 @@ def run_cross_validation(
             )
         else:
             y_train = pd.to_numeric(train_pre[label_col], errors="coerce").fillna(0.0).to_numpy()
-            y_valid = pd.to_numeric(valid_pre[label_col], errors="coerce").fillna(0.0)
+            y_valid_transformed = pd.to_numeric(valid_pre[label_col], errors="coerce").fillna(0.0)
+            y_valid_original = pd.to_numeric(valid_fold[label_col], errors="coerce").fillna(0.0)
             model, model_type_used = _build_model(
                 task_type=task_type,
                 model_type=model_type,
@@ -142,7 +147,13 @@ def run_cross_validation(
             )
             model.fit(x_train, y_train)
             y_pred = np.asarray(model.predict(x_valid))
-            score = _score_regression(metric=metric, y_true=y_valid, y_pred=y_pred)
+            if target_transform_method is not None:
+                y_pred_eval = _inverse_transform_target_array(y_pred, target_transform_method)
+                y_valid_eval = y_valid_original
+            else:
+                y_pred_eval = y_pred
+                y_valid_eval = y_valid_transformed
+            score = _score_regression(metric=metric, y_true=y_valid_eval, y_pred=y_pred_eval)
 
         fold_scores.append(float(score))
         fold_details.append(
@@ -381,6 +392,36 @@ def _score_regression(metric: str, y_true: pd.Series, y_pred: np.ndarray) -> flo
     if metric == "r2":
         return float(r2_score(y_true, y_pred))
     raise ValueError(f"Unsupported regression metric: {metric}")
+
+
+def _resolve_target_transform_method(
+    prep_state: Any,
+    label_col: str,
+) -> Optional[str]:
+    if not isinstance(prep_state, dict):
+        return None
+
+    info = prep_state.get("target_transform_info")
+    if isinstance(info, dict):
+        method = str(info.get("method", "")).strip().lower()
+        column = str(info.get("column", "")).strip()
+        if method in {"log1p"} and (not column or column == label_col):
+            return method
+
+    apply_log_transform = prep_state.get("apply_log_transform")
+    label_col_name = str(prep_state.get("label_col_name", "")).strip()
+    if bool(apply_log_transform) and (not label_col_name or label_col_name == label_col):
+        return "log1p"
+
+    return None
+
+
+def _inverse_transform_target_array(values: np.ndarray, method: str) -> np.ndarray:
+    method = str(method).strip().lower()
+    arr = np.asarray(values, dtype=float)
+    if method == "log1p":
+        return np.expm1(arr)
+    return arr
 
 
 def _align_and_encode_pair(train_df: pd.DataFrame, other_df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:

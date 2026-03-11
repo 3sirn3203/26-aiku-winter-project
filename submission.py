@@ -20,6 +20,7 @@ from pathlib import Path
 from types import ModuleType
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
+import numpy as np
 import pandas as pd
 from autogluon.tabular import TabularPredictor
 
@@ -290,6 +291,57 @@ def build_runtime_config(config: Dict[str, Any], submission_data_cfg: Dict[str, 
     if enabled_blocks is not None:
         runtime["enabled_blocks"] = [str(block) for block in enabled_blocks]
     return runtime
+
+
+def resolve_target_transform_method(prep_state: Any, label_col: str) -> Optional[str]:
+    if not isinstance(prep_state, dict):
+        return None
+
+    info = prep_state.get("target_transform_info")
+    if isinstance(info, dict):
+        method = str(info.get("method", "")).strip().lower()
+        column = str(info.get("column", "")).strip()
+        if method in {"log1p"} and (not column or column == label_col):
+            return method
+
+    apply_log_transform = prep_state.get("apply_log_transform")
+    label_col_name = str(prep_state.get("label_col_name", "")).strip()
+    if bool(apply_log_transform) and (not label_col_name or label_col_name == label_col):
+        return "log1p"
+
+    return None
+
+
+def inverse_transform_predictions(predictions: Any, method: Optional[str]) -> pd.Series:
+    if isinstance(predictions, pd.Series):
+        pred_series = predictions.copy()
+    else:
+        pred_series = pd.Series(predictions)
+
+    if method is None:
+        return pred_series
+
+    normalized = str(method).strip().lower()
+    if normalized != "log1p":
+        return pred_series
+
+    numeric = pd.to_numeric(pred_series, errors="coerce")
+    inverted = np.expm1(numeric.to_numpy(dtype=float))
+    return pd.Series(inverted, index=pred_series.index, name=pred_series.name)
+
+
+def is_regression_submission_task(config: Dict[str, Any], submission_model_cfg: Dict[str, Any]) -> bool:
+    modeling_cfg = dict(config.get("modeling", {}) or {})
+    modeling_task_type = str(modeling_cfg.get("task_type", "")).strip().lower()
+    if modeling_task_type:
+        return modeling_task_type == "regression"
+
+    problem_type = str(submission_model_cfg.get("problem_type", "")).strip().lower()
+    if problem_type:
+        return problem_type in {"regression", "quantile"}
+
+    eval_metric = str(submission_model_cfg.get("eval_metric", "")).strip().lower()
+    return eval_metric in {"rmse", "mae", "mse", "r2", "rmsle", "pinball"}
 
 
 def resolve_module_paths(
@@ -728,7 +780,7 @@ def apply_generated_feature_pipeline(
     test_df: pd.DataFrame,
     preprocessor_module: Any,
     feature_module: Any,
-) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, Optional[str]]:
     enabled_blocks = parse_enabled_blocks(submission_cfg.get("enabled_blocks"))
     runtime_config = build_runtime_config(
         config=config,
@@ -738,6 +790,7 @@ def apply_generated_feature_pipeline(
     )
 
     prep_state = preprocessor_module.fit_preprocessor(train_only_df.copy(), label_col, runtime_config)
+    target_transform_method = resolve_target_transform_method(prep_state=prep_state, label_col=label_col)
     train_pre = ensure_dataframe(preprocessor_module.transform_preprocessor(train_only_df.copy(), prep_state, runtime_config))
     tuning_pre = ensure_dataframe(preprocessor_module.transform_preprocessor(tuning_df.copy(), prep_state, runtime_config))
     test_pre = ensure_dataframe(preprocessor_module.transform_preprocessor(test_df.copy(), prep_state, runtime_config))
@@ -783,7 +836,7 @@ def apply_generated_feature_pipeline(
     train_ag[label_col] = train_pre[label_col].values
     tuning_ag = x_tuning.copy()
     tuning_ag[label_col] = tuning_pre[label_col].values
-    return train_ag, tuning_ag, x_test
+    return train_ag, tuning_ag, x_test, target_transform_method
 
 
 def main() -> None:
@@ -987,7 +1040,7 @@ def main() -> None:
     random_state = int(submission_validation_cfg.get("random_state", 42))
     train_only_df, tuning_df = split_holdout(train_df=train_df, holdout_frac=holdout_frac, random_state=random_state)
 
-    train_ag, tuning_ag, test_ag = apply_generated_feature_pipeline(
+    train_ag, tuning_ag, test_ag, target_transform_method = apply_generated_feature_pipeline(
         config=config,
         submission_data_cfg=submission_data_cfg,
         submission_cfg=submission_cfg,
@@ -1012,6 +1065,11 @@ def main() -> None:
         predictions = predictor.predict(test_ag)
     finally:
         shutil.rmtree(temp_model_path, ignore_errors=True)
+
+    if is_regression_submission_task(config=config, submission_model_cfg=submission_model_cfg):
+        predictions = inverse_transform_predictions(predictions, target_transform_method)
+        if target_transform_method:
+            print(f"[INFO] applied inverse target transform for submission predictions: {target_transform_method}")
 
     submission_df = sample_submission_df.copy()
     if id_col in test_df.columns and id_col in submission_df.columns:
