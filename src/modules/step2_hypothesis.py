@@ -19,7 +19,7 @@ Also generate direct coding instructions for Step3 implementation."""
 HYPOTHESIS_WEB_RESEARCH_SYSTEM_INSTRUCTION = """You are a web research agent for tabular ML feature engineering.
 Use Google Search to find practical preprocessing and feature engineering methods.
 Never suggest collecting additional external tabular datasets.
-Return only a valid JSON object matching the schema."""
+Return plain text only (no JSON, no markdown fences)."""
 
 HYPOTHESIS_WEB_RESEARCH_PROMPT = """Given the dataset profile context below, research high-impact methods for:
 1) preprocessing
@@ -31,19 +31,13 @@ Requirements:
 - Avoid methods requiring external tabular data collection.
 - Prioritize methods that can be validated with CV quickly.
 - Use previous diagnose context (if provided) to avoid repeating failed directions.
-
-Return schema:
-{
-  "summary": "string",
-  "findings": [
-    {
-      "topic": "string",
-      "why_relevant": "string",
-      "recommended_actions": ["string", "..."],
-      "source_urls": ["https://...", "..."]
-    }
-  ]
-}
+- Return a concise plain-text memo in Korean or English.
+- Include explicit section headers:
+  [summary]
+  [preprocessing]
+  [feature_engineering]
+  [sources]
+- In [sources], include concrete URLs used.
 
 Task context JSON (nullable):
 {task_context_json}
@@ -61,18 +55,6 @@ class HypothesisResponse(BaseModel):
     feature_engineering: List[str] = Field(default_factory=list)
     preprocessing_codegen_instruction: str = ""
     feature_engineering_codegen_instructions: List[str] = Field(default_factory=list)
-
-
-class WebResearchFinding(BaseModel):
-    topic: str = ""
-    why_relevant: str = ""
-    recommended_actions: List[str] = Field(default_factory=list)
-    source_urls: List[str] = Field(default_factory=list)
-
-
-class WebResearchResponse(BaseModel):
-    summary: str = ""
-    findings: List[WebResearchFinding] = Field(default_factory=list)
 
 
 def generate_hypotheses(
@@ -110,9 +92,10 @@ def generate_hypotheses(
         profile_result=profile_result,
         hypothesis_cfg=hypothesis_cfg,
     )
+    web_research_text_for_prompt = str(web_research.get("text", "") or "").strip()
     prompt = prompt_template.render(
         profile_result_json=json.dumps(profile_context_for_hypothesis, ensure_ascii=False),
-        web_research_json=json.dumps(web_research.get("context"), ensure_ascii=False),
+        web_research_text=web_research_text_for_prompt if web_research_text_for_prompt else "null",
         feature_engineering_count_instruction=_build_feature_engineering_count_instruction(
             feature_engineering_hypothesis_count
         ),
@@ -226,6 +209,8 @@ def generate_hypotheses(
                     "used": bool(web_research.get("used", False)),
                     "status": web_research.get("status", "disabled"),
                     "error": web_research.get("error", ""),
+                    "text_chars": len(web_research_text_for_prompt),
+                    "text_path": web_research.get("text_path", ""),
                 },
                 "profile_context_mode": str(
                     hypothesis_cfg.get("profile_context_mode", "compact")
@@ -415,20 +400,21 @@ def _run_hypothesis_web_research(
 ) -> Dict[str, Any]:
     web_cfg = hypothesis_cfg.get("web_search", {}) if isinstance(hypothesis_cfg, dict) else {}
     enabled = bool(web_cfg.get("enabled", False))
+    web_research_text_path = os.path.join(hypothesis_dir, "web_research.txt")
 
     result: Dict[str, Any] = {
         "enabled": enabled,
         "used": False,
         "status": "disabled",
         "error": "",
-        "context": {
-            "summary": "",
-            "findings": [],
-        },
+        "text": "",
+        "text_path": web_research_text_path,
     }
 
     if not enabled:
         print("    [Step2:web_research] skipped (disabled)")
+        Path(web_research_text_path).write_text("", encoding="utf-8")
+        result["text_chars"] = 0
         with open(os.path.join(hypothesis_dir, "web_research.json"), "w", encoding="utf-8") as file:
             json.dump(result, file, ensure_ascii=False, indent=2)
         return result
@@ -469,7 +455,7 @@ def _run_hypothesis_web_research(
 
     last_raw_text = ""
     last_error = ""
-    normalized: Optional[Dict[str, Any]] = None
+    last_response_meta: Dict[str, Any] = {}
 
     for attempt in range(1, max_attempts + 1):
         try:
@@ -489,16 +475,38 @@ def _run_hypothesis_web_research(
                 ),
             )
             response_meta = _extract_response_meta(response)
+            last_response_meta = response_meta
             raw_text = str(getattr(response, "text", "") or "").strip()
             last_raw_text = raw_text
             print(
                 f"    [Step2:web_research] LLM attempt {attempt} "
                 f"response_chars={len(raw_text)} finish_reason={response_meta.get('finish_reason', 'unknown')}"
             )
-            parsed = _parse_hypothesis_web_research_response(response=response, raw_text=raw_text)
-            normalized = parsed.model_dump()
+            if not raw_text:
+                last_error = "empty_web_research_output"
+                print(f"    [Step2:web_research] LLM attempt {attempt} failed: {last_error}")
+                with open(
+                    os.path.join(hypothesis_dir, f"web_research_attempt_{attempt}.json"),
+                    "w",
+                    encoding="utf-8",
+                ) as file:
+                    json.dump(
+                        {
+                            "attempt": attempt,
+                            "error": last_error,
+                            "response_meta": response_meta,
+                            "raw_text": raw_text,
+                        },
+                        file,
+                        ensure_ascii=False,
+                        indent=2,
+                    )
+                continue
+            result["used"] = True
+            result["status"] = "success"
+            result["text"] = raw_text
             last_error = ""
-            print(f"    [Step2:web_research] LLM attempt {attempt} parsed successfully")
+            print(f"    [Step2:web_research] LLM attempt {attempt} collected successfully")
             break
         except Exception as exc:  # noqa: BLE001
             last_error = str(exc)
@@ -508,6 +516,7 @@ def _run_hypothesis_web_research(
                     {
                         "attempt": attempt,
                         "error": last_error,
+                        "response_meta": last_response_meta,
                         "raw_text": last_raw_text,
                     },
                     file,
@@ -515,13 +524,12 @@ def _run_hypothesis_web_research(
                     indent=2,
                 )
 
-    if normalized is None:
+    if result.get("status") != "success":
         result["status"] = "failed"
         result["error"] = last_error or "web_research_failed"
-    else:
-        result["used"] = True
-        result["status"] = "success"
-        result["context"] = normalized
+
+    result["text_chars"] = len(str(result.get("text", "")))
+    Path(web_research_text_path).write_text(str(result.get("text", "")), encoding="utf-8")
 
     with open(os.path.join(hypothesis_dir, "web_research.json"), "w", encoding="utf-8") as file:
         json.dump(result, file, ensure_ascii=False, indent=2)
@@ -539,6 +547,8 @@ def _run_hypothesis_web_research(
                 "task_context": task_context,
                 "raw_text": last_raw_text,
                 "last_error": last_error,
+                "response_meta": last_response_meta,
+                "text_path": web_research_text_path,
             },
             file,
             ensure_ascii=False,
@@ -750,20 +760,6 @@ def _build_previous_diagnose_context(
     if compact["status"] is None and compact["root_cause"]["category"] is None:
         return None
     return compact
-
-
-def _parse_hypothesis_web_research_response(response: Any, raw_text: str) -> WebResearchResponse:
-    parsed = getattr(response, "parsed", None)
-    if parsed is not None:
-        if isinstance(parsed, WebResearchResponse):
-            return parsed
-        try:
-            return WebResearchResponse.model_validate(parsed)
-        except ValidationError:
-            pass
-
-    raw_obj = _parse_json_response(raw_text)
-    return WebResearchResponse.model_validate(raw_obj)
 
 
 def _extract_response_meta(response: Any) -> Dict[str, Any]:

@@ -464,25 +464,70 @@ def _load_generated_preprocessor_module(preprocessor_module_path: str) -> Any:
     return obj
 
 
+def _is_feature_block_class(candidate: Any, module_name: str) -> bool:
+    return (
+        inspect.isclass(candidate)
+        and getattr(candidate, "__module__", "") == module_name
+        and hasattr(candidate, "fit")
+        and hasattr(candidate, "transform")
+    )
+
+
+def _extract_block_index_from_path(path: str) -> Optional[int]:
+    stem = Path(path).stem
+    match = re.search(r"feature_block_(\d+)$", stem)
+    if match is None:
+        return None
+    try:
+        return int(match.group(1))
+    except Exception:
+        return None
+
+
 def _load_generated_feature_block_module(feature_block_module_path: str, index: int) -> Any:
     module = load_module_from_path(
         feature_block_module_path,
         f"submission_generated_feature_block_module_{index}",
     )
-    class_name = f"GeneratedFeatureBlock{index}"
-    candidate = getattr(module, class_name, None)
-    if candidate is None:
-        for value in module.__dict__.values():
-            if inspect.isclass(value) and hasattr(value, "fit") and hasattr(value, "transform"):
-                candidate = value
-                break
-    obj = candidate() if inspect.isclass(candidate) else candidate
-    if obj is None:
+    module_name = str(getattr(module, "__name__", "") or "")
+    local_index = _extract_block_index_from_path(feature_block_module_path)
+
+    expected_names: List[str] = []
+    if isinstance(local_index, int):
+        expected_names.append(f"GeneratedFeatureBlock{local_index}")
+    expected_names.append(f"GeneratedFeatureBlock{index}")
+    expected_names = list(dict.fromkeys(expected_names))
+
+    for class_name in expected_names:
+        candidate = getattr(module, class_name, None)
+        if _is_feature_block_class(candidate, module_name):
+            obj = candidate()
+            assert_module_functions(obj, ["fit", "transform"], class_name)
+            return obj
+
+    fallback_candidates = []
+    for name, value in module.__dict__.items():
+        if _is_feature_block_class(value, module_name):
+            fallback_candidates.append((str(name), value))
+
+    if len(fallback_candidates) == 1:
+        class_name, candidate = fallback_candidates[0]
+        obj = candidate()
+        assert_module_functions(obj, ["fit", "transform"], class_name)
+        return obj
+
+    if len(fallback_candidates) == 0:
         raise ValueError(
-            f"Feature block class not found: index={index}, path={feature_block_module_path}"
+            "Feature block class not found: "
+            f"index={index}, path={feature_block_module_path}, expected_names={expected_names}"
         )
-    assert_module_functions(obj, ["fit", "transform"], f"generated_feature_block_{index}")
-    return obj
+
+    candidate_names = [name for name, _ in fallback_candidates]
+    raise ValueError(
+        "Multiple feature block classes found in module: "
+        f"path={feature_block_module_path}, expected_names={expected_names}, "
+        f"candidates={candidate_names}"
+    )
 
 
 class SubmissionComposedFeatureEngineering:

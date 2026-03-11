@@ -205,10 +205,10 @@ def _load_module_from_path(path: str, module_name: str) -> Any:
     if spec is None or spec.loader is None:
         raise ImportError(f"Could not load module spec: {module_path}")
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
     for symbol_name, symbol_value in COMMON_SYMBOLS.items():
         if symbol_name not in module.__dict__ and symbol_value is not None:
             module.__dict__[symbol_name] = symbol_value
+    spec.loader.exec_module(module)
     return module
 
 
@@ -228,20 +228,66 @@ def _load_preprocessor(path: str) -> Any:
     return obj
 
 
+def _is_feature_block_class(candidate: Any, module_name: str) -> bool:
+    return (
+        isinstance(candidate, type)
+        and getattr(candidate, "__module__", "") == module_name
+        and hasattr(candidate, "fit")
+        and hasattr(candidate, "transform")
+    )
+
+
+def _extract_block_index_from_path(path: str) -> Optional[int]:
+    stem = Path(path).stem
+    match = re.search(r"feature_block_(\\d+)$", stem)
+    if match is None:
+        return None
+    try:
+        return int(match.group(1))
+    except Exception:
+        return None
+
+
 def _load_feature_block(path: str, index: int) -> Any:
     module = _load_module_from_path(path, f"generated_feature_block_{index}")
-    class_name = f"GeneratedFeatureBlock{index}"
-    candidate = getattr(module, class_name, None)
-    if candidate is None:
-        for value in module.__dict__.values():
-            if isinstance(value, type) and hasattr(value, "fit") and hasattr(value, "transform"):
-                candidate = value
-                break
-    block = candidate() if isinstance(candidate, type) else candidate
-    if block is None:
-        raise ValueError(f"Feature block class not found: index={index}, path={path}")
-    _assert_methods(block, ["fit", "transform"], f"GeneratedFeatureBlock{index}")
-    return block
+    module_name = str(getattr(module, "__name__", "") or "")
+    local_index = _extract_block_index_from_path(path)
+
+    expected_names: List[str] = []
+    if isinstance(local_index, int):
+        expected_names.append(f"GeneratedFeatureBlock{local_index}")
+    expected_names.append(f"GeneratedFeatureBlock{index}")
+    expected_names = list(dict.fromkeys(expected_names))
+
+    for class_name in expected_names:
+        candidate = getattr(module, class_name, None)
+        if _is_feature_block_class(candidate, module_name):
+            block = candidate()
+            _assert_methods(block, ["fit", "transform"], class_name)
+            return block
+
+    fallback_candidates = []
+    for name, value in module.__dict__.items():
+        if _is_feature_block_class(value, module_name):
+            fallback_candidates.append((str(name), value))
+
+    if len(fallback_candidates) == 1:
+        class_name, candidate = fallback_candidates[0]
+        block = candidate()
+        _assert_methods(block, ["fit", "transform"], class_name)
+        return block
+
+    if len(fallback_candidates) == 0:
+        raise ValueError(
+            "Feature block class not found: "
+            f"index={index}, path={path}, expected_names={expected_names}"
+        )
+
+    candidate_names = [name for name, _ in fallback_candidates]
+    raise ValueError(
+        "Multiple feature block classes found in module: "
+        f"path={path}, expected_names={expected_names}, candidates={candidate_names}"
+    )
 
 
 class GeneratedFeatureEngineering:
