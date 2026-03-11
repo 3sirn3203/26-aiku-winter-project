@@ -10,7 +10,9 @@ Task:
 Output format (STRICT JSON object):
 {
   "preprocessing": ["text hypothesis", "..."],
-  "feature_engineering": ["text hypothesis", "..."]
+  "feature_engineering": ["text hypothesis", "..."],
+  "preprocessing_codegen_instruction": "string",
+  "feature_engineering_codegen_instructions": ["string", "..."]
 }
 
 `feature_engineering` item format (STRICT per-item text contract):
@@ -28,13 +30,23 @@ Rules:
 - Prefer interactions / ratios / group statistics / cross features over simple one-column transforms.
 - Do not propose plain imputation, plain one-hot encoding, or plain label encoding as a feature hypothesis by itself.
 - Use real column names from profile context in `columns_used`.
+- `preprocessing_codegen_instruction`:
+  - Write a direct coding instruction that Step3 can execute without extra context.
+  - Include: fit-time state, transform-time behavior, missing-value handling, dtype handling, and leakage guard.
+- `feature_engineering_codegen_instructions`:
+  - Must have the same length and order as `feature_engineering`.
+  - Each item must be a direct coding instruction for one feature block class (`fit` + `transform` contract).
+  - Step3 will use this text directly as implementation guidance.
 - Do not output markdown.
 
-Profile result:
+Profile context:
 {{ profile_result_json }}
 
 Task context JSON (nullable):
 {{ task_context_json }}
+
+Previous diagnose context JSON (nullable):
+{{ previous_diagnose_json }}
 
 Web research result (nullable JSON):
 {{ web_research_json }}

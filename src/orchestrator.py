@@ -111,6 +111,7 @@ def run_pipeline(config: Dict) -> Dict:
                 hypothesis_cfg=hypothesis_cfg,
                 profile_result=profile_result,
                 output_dir=iter_dir,
+                prev_diagnose_result=prev_diagnose_result,
                 task_context=task_context,
             )
 

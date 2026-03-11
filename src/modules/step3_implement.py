@@ -39,7 +39,7 @@ def implement(
     external_feedback: Optional[Dict[str, Any]] = None,
     task_context: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    del train_path, label_col, pipeline_config
+    del train_path, label_col, pipeline_config, profile_result, task_context
 
     implement_dir = Path(output_dir) / "implement"
     implement_dir.mkdir(parents=True, exist_ok=True)
@@ -82,9 +82,16 @@ def implement(
     if not feature_block_prompt_path.exists():
         raise FileNotFoundError(f"Feature block prompt template not found: {feature_block_prompt_path}")
 
-    profile_context = _build_profile_context(profile_result=profile_result, implement_cfg=implement_cfg)
     preprocessing_hypotheses = _normalize_text_list(hypotheses.get("preprocessing"))
     feature_hypotheses = _normalize_text_list(hypotheses.get("feature_engineering"))
+    preprocessing_codegen_instruction = _resolve_preprocessing_codegen_instruction(
+        hypotheses=hypotheses,
+        preprocessing_hypotheses=preprocessing_hypotheses,
+    )
+    feature_codegen_instructions = _resolve_feature_codegen_instructions(
+        hypotheses=hypotheses,
+        feature_hypotheses=feature_hypotheses,
+    )
 
     preprocessor_template = Template(preprocessor_prompt_path.read_text(encoding="utf-8"))
     feature_block_template = Template(feature_block_prompt_path.read_text(encoding="utf-8"))
@@ -100,16 +107,19 @@ def implement(
         max_attempts=max_codegen_attempts,
         syntax_check=syntax_check,
         system_instruction=preprocessor_system_instruction,
-        profile_context=profile_context,
         preprocessing_hypotheses=preprocessing_hypotheses,
-        feature_hypotheses=feature_hypotheses,
+        preprocessing_codegen_instruction=preprocessing_codegen_instruction,
         external_feedback=external_feedback,
-        task_context=task_context,
     )
 
     feature_block_results: List[Dict[str, Any]] = []
     for index, hypothesis_text in enumerate(feature_hypotheses, start=1):
         class_name = f"GeneratedFeatureBlock{index}"
+        feature_codegen_instruction = (
+            feature_codegen_instructions[index - 1]
+            if index - 1 < len(feature_codegen_instructions)
+            else _default_feature_codegen_instruction(hypothesis_text)
+        )
         block_result = _generate_feature_block_module(
             client=client,
             template=feature_block_template,
@@ -124,9 +134,8 @@ def implement(
             class_name=class_name,
             index=index,
             hypothesis_text=hypothesis_text,
-            profile_context=profile_context,
+            feature_codegen_instruction=feature_codegen_instruction,
             external_feedback=external_feedback,
-            task_context=task_context,
         )
         feature_block_results.append(block_result)
 
@@ -166,9 +175,9 @@ def implement(
             "feature_block_prompt_path": str(feature_block_prompt_path),
             "preprocessor_system_instruction": preprocessor_system_instruction,
             "feature_block_system_instruction": feature_block_system_instruction,
-            "profile_context_keys": list(profile_context.keys()),
             "preprocessing_hypothesis_count": len(preprocessing_hypotheses),
             "feature_hypothesis_count": len(feature_hypotheses),
+            "feature_codegen_instruction_count": len(feature_codegen_instructions),
         },
     }
     _write_json(implement_dir / "implement_summary.json", summary)
@@ -186,11 +195,9 @@ def _generate_preprocessor_module(
     max_attempts: int,
     syntax_check: bool,
     system_instruction: str,
-    profile_context: Dict[str, Any],
     preprocessing_hypotheses: List[str],
-    feature_hypotheses: List[str],
+    preprocessing_codegen_instruction: str,
     external_feedback: Optional[Dict[str, Any]],
-    task_context: Optional[Dict[str, Any]],
 ) -> Dict[str, Any]:
     output_path = implement_dir / "preprocessor_module.py"
     last_error = ""
@@ -200,14 +207,8 @@ def _generate_preprocessor_module(
 
     for attempt in range(1, max_attempts + 1):
         prompt = template.render(
-            profile_result_json=json.dumps(profile_context, ensure_ascii=False),
             preprocessing_hypotheses_json=json.dumps(preprocessing_hypotheses, ensure_ascii=False),
-            feature_hypotheses_json=json.dumps(feature_hypotheses, ensure_ascii=False),
-            task_context_json=(
-                json.dumps(task_context, ensure_ascii=False)
-                if isinstance(task_context, dict) and task_context
-                else "null"
-            ),
+            preprocessing_codegen_instruction=preprocessing_codegen_instruction,
             generation_feedback_json=json.dumps(feedback, ensure_ascii=False) if feedback is not None else "null",
             external_feedback_json=json.dumps(external_feedback, ensure_ascii=False) if external_feedback is not None else "null",
         )
@@ -300,9 +301,8 @@ def _generate_feature_block_module(
     class_name: str,
     index: int,
     hypothesis_text: str,
-    profile_context: Dict[str, Any],
+    feature_codegen_instruction: str,
     external_feedback: Optional[Dict[str, Any]],
-    task_context: Optional[Dict[str, Any]],
 ) -> Dict[str, Any]:
     output_path = implement_dir / f"feature_block_{index}.py"
     last_error = ""
@@ -315,12 +315,7 @@ def _generate_feature_block_module(
             class_name=class_name,
             feature_index=index,
             hypothesis_text=hypothesis_text,
-            profile_result_json=json.dumps(profile_context, ensure_ascii=False),
-            task_context_json=(
-                json.dumps(task_context, ensure_ascii=False)
-                if isinstance(task_context, dict) and task_context
-                else "null"
-            ),
+            feature_codegen_instruction=feature_codegen_instruction,
             generation_feedback_json=json.dumps(feedback, ensure_ascii=False) if feedback is not None else "null",
             external_feedback_json=json.dumps(external_feedback, ensure_ascii=False) if external_feedback is not None else "null",
         )
@@ -502,67 +497,50 @@ def _normalize_text_list(value: Any) -> List[str]:
     return []
 
 
-def _build_profile_context(profile_result: Dict[str, Any], implement_cfg: Dict[str, Any]) -> Dict[str, Any]:
-    if not isinstance(profile_result, dict):
-        return {}
+def _resolve_preprocessing_codegen_instruction(
+    hypotheses: Dict[str, Any],
+    preprocessing_hypotheses: List[str],
+) -> str:
+    direct = str(hypotheses.get("preprocessing_codegen_instruction", "") or "").strip()
+    if direct:
+        return direct
 
-    max_items = int(implement_cfg.get("profile_context_max_items", 8))
-    max_text_chars = int(implement_cfg.get("profile_context_max_text_chars", 800))
-    max_columns = int(implement_cfg.get("profile_context_max_columns", 80))
+    if preprocessing_hypotheses:
+        joined = "; ".join(preprocessing_hypotheses[:5])
+        return (
+            "Implement train-only deterministic preprocessing using these hypotheses in order: "
+            f"{joined}. Preserve label column on transform and avoid target leakage."
+        )
 
-    preferred_keys = [
-        "summary",
-        "insights",
-        "risks",
-        "recommended_next_actions",
-        "shape",
-        "columns",
-        "dtypes",
-        "missing_top",
-        "cardinality_top",
-    ]
-
-    context: Dict[str, Any] = {}
-    for key in preferred_keys:
-        if key not in profile_result:
-            continue
-        value = profile_result.get(key)
-        if key == "columns" and isinstance(value, list):
-            context[key] = [str(col) for col in value[:max_columns]]
-        else:
-            context[key] = _trim_profile_value(value=value, max_items=max_items, max_text_chars=max_text_chars)
-
-    if not context:
-        for idx, (key, value) in enumerate(profile_result.items()):
-            if idx >= max_items:
-                break
-            context[str(key)] = _trim_profile_value(value=value, max_items=max_items, max_text_chars=max_text_chars)
-
-    context["_keys_in_original_profile"] = list(profile_result.keys())
-    return context
+    return (
+        "Implement robust deterministic preprocessing with stable schema alignment, "
+        "missing-value handling, dtype-safe conversion, and no target leakage."
+    )
 
 
-def _trim_profile_value(value: Any, max_items: int, max_text_chars: int) -> Any:
-    if value is None or isinstance(value, (bool, int, float)):
-        return value
-    if isinstance(value, str):
-        text = value.strip()
-        if len(text) <= max_text_chars:
-            return text
-        return text[:max_text_chars] + "...(truncated)"
-    if isinstance(value, list):
-        return [
-            _trim_profile_value(item, max_items=max_items, max_text_chars=max_text_chars)
-            for item in value[:max_items]
-        ]
-    if isinstance(value, dict):
-        out: Dict[str, Any] = {}
-        for idx, (k, v) in enumerate(value.items()):
-            if idx >= max_items:
-                break
-            out[str(k)] = _trim_profile_value(v, max_items=max_items, max_text_chars=max_text_chars)
-        return out
-    return str(value)[:max_text_chars]
+def _resolve_feature_codegen_instructions(
+    hypotheses: Dict[str, Any],
+    feature_hypotheses: List[str],
+) -> List[str]:
+    raw = hypotheses.get("feature_engineering_codegen_instructions", [])
+    instructions = _normalize_text_list(raw)
+    target_count = len(feature_hypotheses)
+
+    while len(instructions) < target_count:
+        idx = len(instructions)
+        hypothesis_text = feature_hypotheses[idx] if idx < len(feature_hypotheses) else f"feature_{idx + 1}"
+        instructions.append(_default_feature_codegen_instruction(hypothesis_text))
+
+    return instructions[:target_count]
+
+
+def _default_feature_codegen_instruction(hypothesis_text: str) -> str:
+    return (
+        "Implement exactly one feature for this hypothesis. "
+        f"Hypothesis: {str(hypothesis_text).strip()}. "
+        "In fit(), compute train-only state. In transform(), return one pd.Series aligned to df.index "
+        "without using label values and with deterministic missing-value handling."
+    )
 
 
 def _extract_response_meta(response: Any) -> Dict[str, Any]:

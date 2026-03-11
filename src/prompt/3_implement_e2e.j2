@@ -32,17 +32,11 @@ class GeneratedPreprocessor:
 # class GeneratedFeatureEngineering: ...
 # def main() -> None: ...
 
-Profile context JSON:
-{{ profile_result_json }}
-
-Task context JSON (nullable):
-{{ task_context_json }}
-
 Preprocessing hypotheses:
 {{ preprocessing_hypotheses_json }}
 
-Feature engineering hypotheses (context only, do not implement here):
-{{ feature_hypotheses_json }}
+Direct coding instruction from Step2 (implement this):
+{{ preprocessing_codegen_instruction }}
 
 External execution feedback (nullable):
 {{ external_feedback_json }}
