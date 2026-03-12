@@ -269,6 +269,26 @@ def sanitize_feature_columns(
     return out_train, out_others
 
 
+def fill_missing_for_autogluon(
+    train_df: pd.DataFrame,
+    other_dfs: List[pd.DataFrame],
+) -> Tuple[pd.DataFrame, List[pd.DataFrame]]:
+    train_out = train_df.copy()
+    others_out = [df.copy() for df in other_dfs]
+
+    for col in train_out.columns:
+        if pd.api.types.is_numeric_dtype(train_out[col]):
+            train_out[col] = pd.to_numeric(train_out[col], errors="coerce").fillna(0.0)
+            for other in others_out:
+                other[col] = pd.to_numeric(other[col], errors="coerce").fillna(0.0)
+        else:
+            train_out[col] = train_out[col].astype("string").fillna("__MISSING__")
+            for other in others_out:
+                other[col] = other[col].astype("string").fillna("__MISSING__")
+
+    return train_out, others_out
+
+
 def parse_enabled_blocks(raw: Any) -> Optional[List[str]]:
     if raw is None:
         return None
@@ -828,9 +848,7 @@ def apply_generated_feature_pipeline(
     if bool(submission_cfg.get("sanitize_feature_names", True)):
         x_train, [x_tuning, x_test] = sanitize_feature_columns(x_train, [x_tuning, x_test])
 
-    x_train = x_train.fillna(0)
-    x_tuning = x_tuning.fillna(0)
-    x_test = x_test.fillna(0)
+    x_train, [x_tuning, x_test] = fill_missing_for_autogluon(x_train, [x_tuning, x_test])
 
     train_ag = x_train.copy()
     train_ag[label_col] = train_pre[label_col].values
